@@ -43,6 +43,10 @@ interface EventDao {
     @Query("SELECT COUNT(*) FROM events WHERE outcome = :outcome AND postedAt >= :since AND status = 'INTEREST'")
     suspend fun countInterestOutcomeSince(outcome: String, since: Long): Int
 
+    /** Topics the interest patrol proposed recently, newest first: the memory that keeps batches from repeating. */
+    @Query("SELECT * FROM events WHERE status = 'INTEREST' AND postedAt >= :since ORDER BY postedAt DESC LIMIT 60")
+    suspend fun recentInterestTopics(since: Long): List<NotifEvent>
+
     @Query("SELECT COUNT(*) FROM events WHERE status = 'JUDGED' AND id > :afterId")
     suspend fun countJudgedAfter(afterId: Long): Int
 
@@ -99,6 +103,9 @@ interface FeedDao {
 
     @Query("SELECT title FROM feed ORDER BY createdAt DESC LIMIT :limit")
     suspend fun recentTitles(limit: Int): List<String>
+
+    @Query("SELECT sourcesJson FROM feed ORDER BY createdAt DESC LIMIT :limit")
+    suspend fun recentSources(limit: Int): List<String>
 
     @Query("SELECT title FROM feed WHERE liked = 1 ORDER BY createdAt DESC LIMIT :limit")
     suspend fun likedTitles(limit: Int): List<String>

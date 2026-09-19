@@ -126,8 +126,8 @@ private fun RefreshHeader() {
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(status, color = Ink.Muted, fontSize = 12.sp, maxLines = 2, modifier = Modifier.weight(1f).padding(end = 8.dp))
-        Pill(if (refreshing) "生成中" else "换一批", Ink.Black) {
-            if (!refreshing) Graph.scope.launch { runCatching { Graph.feed.refreshFromProfile() } }
+        Pill(if (refreshing) "生成中" else "再来一批", Ink.Black) {
+            if (!refreshing) Graph.scope.launch { runCatching { Graph.feed.refreshFromProfile(manual = true) } }
         }
     }
 }

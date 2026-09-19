@@ -4,6 +4,8 @@ import android.util.Log
 import com.logan.spellmini.data.AppDb
 import com.logan.spellmini.data.EventStatus
 import com.logan.spellmini.data.FeedCard
+import com.logan.spellmini.data.MsgKind
+import com.logan.spellmini.data.MsgRole
 import com.logan.spellmini.data.NotifEvent
 import com.logan.spellmini.data.Outcome
 import com.logan.spellmini.data.Route
@@ -117,7 +119,7 @@ class FeedAgent(
         val hour = Calendar.getInstance().get(Calendar.HOUR_OF_DAY)
         if (hour < QUIET_UNTIL_HOUR) return
         if (System.currentTimeMillis() - settings.lastInterestRunAt < settings.interestIntervalMin * 60_000L) return
-        runCatching { refreshFromProfile() }.onFailure { Log.w(TAG, "interest refresh failed", it) }
+        runCatching { refreshFromProfile(manual = false) }.onFailure { Log.w(TAG, "interest refresh failed", it) }
     }
 
     /**
@@ -125,11 +127,11 @@ class FeedAgent(
      * Every topic leaves a row in the trace (status INTEREST), so cost, skips and failures are as visible as they are
      * for notifications. Returns a one-line summary for the UI.
      */
-    suspend fun refreshFromProfile(): String {
+    suspend fun refreshFromProfile(manual: Boolean): String {
         if (!refreshLock.tryLock()) return "上一批还在生成"
         refreshing.value = true
         try {
-            return runBatch().also { lastSummary.value = it }
+            return runBatch(manual).also { lastSummary.value = it }
         } catch (error: Exception) {
             lastSummary.value = "这一轮没成功：${error.message?.take(80) ?: error.javaClass.simpleName}"
             throw error
@@ -139,7 +141,7 @@ class FeedAgent(
         }
     }
 
-    private suspend fun runBatch(): String {
+    private suspend fun runBatch(manual: Boolean): String {
         val now = System.currentTimeMillis()
         settings.lastInterestRunAt = now
         val profile = profileText()
@@ -149,17 +151,55 @@ class FeedAgent(
         if (room <= 0) return "今天按兴趣生成的卡已达上限 ${settings.interestPerDayCap}"
         val wanted = minOf(settings.interestBatchSize, room)
 
+        // Titles alone did not stop repeats: two batches both produced "which suburb has autumn colour this weekend"
+        // under different wording. The planner now sees the earlier topics with their angles, and code enforces it.
+        val recent = db.events().recentInterestTopics(now - DAY_MS).filter { it.title != ROUND_MARKER }
+        val cooling = recent.filter { it.outcome == Outcome.FEED_CARD && now - it.postedAt < COOLDOWN_MS }.map { it.title }.distinct()
+        val done = recent.joinToString("\n") {
+            val hours = (now - it.postedAt) / 3_600_000
+            val result = if (it.outcome == Outcome.FEED_CARD) "已出卡" else "没做成"
+            "- [${if (hours < 1) "刚才" else "$hours 小时前"}｜${it.title}｜$result] ${it.text.lineSequence().firstOrNull().orEmpty()}"
+        }.ifBlank { "（还没有）" }
+        val mode = if (manual) {
+            "这一轮是他手动点的「再来一批」，说明他想看新的：给出的选题必须和上面做过的明显不同。"
+        } else {
+            "这个巡查每小时跑一次，所以宁缺毋滥：想不出足够好的就少给，可以给空列表。"
+        }
+
+        // What he is paying attention to right now. The profile is refreshed only every few hours, so without this the
+        // feed kept circling the same long-term interests while his day moved on.
+        val said = db.messages().lastN(80)
+            .filter { it.role == MsgRole.USER && it.kind == MsgKind.TEXT && now - it.createdAt < DAY_MS }
+            .takeLast(15).reversed().joinToString("\n") { "- ${it.text.replace('\n', ' ').take(100)}" }.ifBlank { "（没有）" }
+        val happening = db.events().recentJudged(80)
+            .filter { now - it.postedAt < DAY_MS && (it.finalRoute == Route.CHAT || it.finalRoute == Route.FEED) }
+            .take(25).joinToString("\n") { "- [${it.appName}] ${it.title} ${it.text.lineSequence().firstOrNull().orEmpty().take(60)}" }.ifBlank { "（没有）" }
+
         val clock = SimpleDateFormat("yyyy-MM-dd HH:mm EEEE", Locale.CHINA).format(Date(now))
         val planPrompt = """
             |你在为用户的个人 Feed 主动找内容。这次没有任何通知触发，全凭你对他的了解。现在是 $clock。
             |请提出最多 $wanted 个此刻值得为他查一查的选题。好选题的标准：
-            |- 对得上画像里明确的兴趣、身份，或他正在进行的事；
+            |- 贴着他最近在关注的事：最近在聊天里提过的、最近通知里反复出现的、刚点过喜欢的方向。这是第一依据；画像里的长期兴趣是第二依据；
             |- 有时效或新意：最近的进展、即将发生的事，或和当下时间相关的实用信息（周末去哪、换季、节假日安排）；
-            |- 和「最近已有的卡片」不重复。同一个兴趣可以换角度，但不要换个说法把同一件事再写一遍；
+            |- 不重复：下面「最近做过的选题」里的事不要再做。换个说法、换个问法去写同一件事，也算重复；
+            |- 轮换：优先选画像里还没做过的兴趣；内容类型也换着来（最新动态、实用攻略、选购对比、本地活动、深度解读、清单推荐）；
+            |- 核心兴趣都做过了，就往相邻的方向找（比如摄影器材 → 这个季节的拍摄地；养猫 → 换季护理），但要说得出和他有什么关系；
             |- 避开他划掉过的主题，多往他点过喜欢的方向靠。
-            |这个巡查每小时跑一次，所以宁缺毋滥：想不出足够好的就少给，可以给空列表。
+            |$mode
             |
-            |用户画像：
+            |最近 24 小时做过的选题：
+            |$done
+            |
+            |冷却中的兴趣（最近 ${COOLDOWN_MS / 3_600_000} 小时已出过卡，这一轮不要选）：${cooling.joinToString("、").ifBlank { "（无）" }}
+            |interest 标签请沿用上面出现过的写法；确实是新的兴趣再起新名字。
+            |
+            |他最近在关注的事（越靠前越新）
+            |最近 24 小时他在聊天里说的话：
+            |$said
+            |最近 24 小时和他有关的通知：
+            |$happening
+            |
+            |用户画像（长期兴趣）：
             |$profile
             |
             |他点过「喜欢」的卡：${db.feed().likedTitles(20).joinToString("；").ifBlank { "（还没有）" }}
@@ -174,7 +214,7 @@ class FeedAgent(
             .mapNotNull { it as? JsonObject }.filter { !it.str("query").isNullOrBlank() }.take(wanted)
 
         if (topics.isEmpty()) {
-            logTopic("（这一轮）", "模型没有想到值得做的新选题", now, Downstream(Outcome.FEED_SKIPPED, "没有新选题", null, planCost, 0))
+            logTopic(ROUND_MARKER, "模型没有想到值得做的新选题", now, Downstream(Outcome.FEED_SKIPPED, "没有新选题", null, planCost, 0))
             return "这一轮没想到值得做的新选题"
         }
         var made = 0
@@ -182,6 +222,11 @@ class FeedAgent(
             val interest = topic.str("interest").orEmpty().ifBlank { "兴趣" }.take(20)
             val angle = topic.str("angle").orEmpty()
             val query = topic.str("query").orEmpty()
+            val repeat = duplicateOf(interest, "$angle $query", cooling, recent)
+            if (repeat != null) {
+                logTopic(interest, "$angle\n搜索词：$query", System.currentTimeMillis(), Downstream(Outcome.FEED_SKIPPED, repeat, null, if (index == 0) planCost else 0.0, 0))
+                return@forEachIndexed
+            }
             val rowId = db.events().insert(interestRow(interest, "$angle\n搜索词：$query", System.currentTimeMillis(), Outcome.PENDING))
             val started = System.nanoTime()
             val origin = Origin("兴趣 · $interest", "你根据他的画像主动挑的选题，对应他的兴趣「$interest」。", rowId)
@@ -198,7 +243,34 @@ class FeedAgent(
             }
             if (result.outcome == Outcome.FEED_CARD) made += 1
         }
-        return "这一轮提了 ${topics.size} 个选题，做成 $made 张卡"
+        return if (made == 0) "这一轮提了 ${topics.size} 个选题，都和做过的重复或材料不够，没有新卡" else "这一轮新增 $made 张卡（提了 ${topics.size} 个选题）"
+    }
+
+    /** Why this topic would repeat something recent, or null when it is genuinely new. Checked before any paid call. */
+    private fun duplicateOf(interest: String, angleAndQuery: String, cooling: List<String>, recent: List<NotifEvent>): String? {
+        cooling.firstOrNull { sameLabel(it, interest) }?.let { return "兴趣「$it」${COOLDOWN_MS / 3_600_000} 小时内刚出过卡，还在冷却" }
+        val closest = recent.maxByOrNull { similarity(it.text, angleAndQuery) } ?: return null
+        val score = similarity(closest.text, angleAndQuery)
+        return if (score >= SAME_TOPIC) "和最近的选题「${closest.text.lineSequence().firstOrNull().orEmpty().take(30)}」太像（相似度 ${"%.2f".format(score)}）" else null
+    }
+
+    private fun sameLabel(a: String, b: String): Boolean {
+        val x = a.trim(); val y = b.trim()
+        return x == y || x.contains(y) || y.contains(x) || similarity(x, y) >= 0.6
+    }
+
+    /**
+     * Overlap of character bigrams, with dates stripped because every query carries the current month. On real pairs:
+     * the same topic reworded scored 0.35, a different angle on the same interest 0.27, unrelated topics 0.00.
+     */
+    private fun similarity(a: String, b: String): Double {
+        fun grams(text: String): Set<String> {
+            val clean = text.lowercase().replace(DATE_NOISE, "").replace(NON_WORD, "")
+            return (0 until (clean.length - 1).coerceAtLeast(0)).map { clean.substring(it, it + 2) }.toSet()
+        }
+        val x = grams(a); val y = grams(b)
+        if (x.isEmpty() || y.isEmpty()) return 0.0
+        return x.intersect(y).size.toDouble() / minOf(x.size, y.size)
     }
 
     private fun interestRow(interest: String, text: String, at: Long, outcome: String) = NotifEvent(
@@ -264,6 +336,15 @@ class FeedAgent(
         val used = card.arr("source_indexes").orEmpty().mapNotNull { (it as? JsonPrimitive)?.intOrNull }
             .mapNotNull { found.sources.getOrNull(it) }.ifEmpty { found.sources.take(3) }.distinctBy { it.url }
 
+        // Same pages as an existing card means the same content, whatever the wording of the topic was.
+        val cited = db.feed().recentSources(RECENT_CARDS).flatMap { row ->
+            runCatching { (kotlinx.serialization.json.Json.parseToJsonElement(row) as kotlinx.serialization.json.JsonArray).mapNotNull { (it as? JsonObject)?.str("url") } }.getOrDefault(emptyList())
+        }.toSet()
+        val overlap = used.count { it.url in cited }
+        if (used.isNotEmpty() && overlap * 2 >= used.size) {
+            return Downstream(Outcome.FEED_SKIPPED, "引用的 ${used.size} 个来源里有 $overlap 个已经被别的卡用过，判为同一份内容", null, cost, elapsed(started))
+        }
+
         // Best effort: a card without a cover is fine, a card waiting on slow pages is not.
         val images = coroutineScope { used.take(4).map { async { api.fetchOgImage(it.url) } }.awaitAll() }
             .filterNotNull().distinct().take(3)
@@ -313,6 +394,13 @@ class FeedAgent(
     companion object {
         private const val TAG = "SpellFeed"
         private const val DAY_MS = 24 * 3_600_000L
+        private const val COOLDOWN_MS = 8 * 3_600_000L
+        private const val SAME_TOPIC = 0.30
+        private const val RECENT_CARDS = 30
+        private const val ROUND_MARKER = "（这一轮）"
+        private val DATE_NOISE = Regex("20\\d\\d年?|\\d+月(上旬|中旬|下旬)?|\\d+日|这个周末|本周|最新")
+        // \\p{P} and \\p{S} are understood by both the JVM and Android's ICU regex engine; \\p{IsPunctuation} is JVM-only.
+        private val NON_WORD = Regex("[\\s\\p{P}\\p{S}]+")
 
         /** No scheduled runs between midnight and this hour; a manual refresh still works. */
         private const val QUIET_UNTIL_HOUR = 7
