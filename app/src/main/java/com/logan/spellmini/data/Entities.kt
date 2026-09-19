@@ -1,0 +1,149 @@
+package com.logan.spellmini.data
+
+import androidx.room.Entity
+import androidx.room.Index
+import androidx.room.PrimaryKey
+
+/** Lifecycle of one notification inside the pipeline. */
+object EventStatus {
+    const val FILTERED = "FILTERED"   // dropped by local rules, never sent anywhere
+    const val APP_OFF = "APP_OFF"     // user switched this app off, never sent anywhere
+    const val QUEUED = "QUEUED"       // waiting for the quiet window / JEV
+    const val JUDGED = "JUDGED"
+    const val ERROR = "ERROR"
+    const val INTEREST = "INTEREST"   // not a notification: one topic of a profile-driven feed run, logged for the trace
+}
+
+object Route {
+    const val CHAT = "chat"
+    const val FEED = "feed"
+    const val IGNORE = "ignore"
+    const val REVIEW = "review"
+}
+
+/** What finally happened downstream of the JEV verdict. */
+object Outcome {
+    const val PENDING = "PENDING"   // verdict is in, the chat turn or feed card is still running
+    const val CHAT_SENT = "CHAT_SENT"
+    const val CHAT_SILENT = "CHAT_SILENT"
+    const val FEED_CARD = "FEED_CARD"
+    const val FEED_SKIPPED = "FEED_SKIPPED"
+    const val CAPPED = "CAPPED"
+    const val ERROR = "ERROR"
+    const val NONE = "NONE"
+}
+
+/** One row per (merged) notification: the trace the user reviews to judge JEV quality. */
+@Entity(tableName = "events", indices = [Index("postedAt"), Index("status")])
+data class NotifEvent(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val sbnKey: String,
+    val pkg: String,
+    val appName: String,
+    val title: String,
+    val text: String,
+    val category: String? = null,
+    val postedAt: Long,
+    val mergedCount: Int = 1,
+    val synthetic: Boolean = false,
+    val status: String,
+    val filterReason: String? = null,
+    val route: String? = null,
+    val routeProbs: String? = null,
+    val confidence: Double? = null,
+    val urgency: Double? = null,
+    val jevModel: String? = null,
+    val jevSource: String? = null,
+    val jevLatencyMs: Long? = null,
+    val jevCostUsd: Double? = null,
+    val jevError: String? = null,
+    val criteriaVersion: String? = null,
+    /** Route after the second judge resolved a `review` verdict; equals [route] otherwise. */
+    val finalRoute: String? = null,
+    val secondJudgeNote: String? = null,
+    val outcome: String? = null,
+    val outcomeNote: String? = null,
+    val outcomeRefId: Long? = null,
+    val downstreamCostUsd: Double? = null,
+    val downstreamLatencyMs: Long? = null,
+)
+
+object MsgRole {
+    const val USER = "user"
+    const val ASSISTANT = "assistant"
+}
+
+object MsgKind {
+    const val TEXT = "text"
+    const val CARD = "card"   // confirm card for a write action
+    const val NOTE = "note"   // small system-style line: "已记住…", "已打开日历"
+}
+
+object CardState {
+    const val PENDING = "pending"
+    const val APPROVED = "approved"
+    const val DENIED = "denied"
+    const val FAILED = "failed"
+}
+
+@Entity(tableName = "messages", indices = [Index("createdAt")])
+data class ChatMsg(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val role: String,
+    val kind: String = MsgKind.TEXT,
+    val text: String,
+    val createdAt: Long,
+    /** Set when this message was triggered by a notification. */
+    val eventId: Long? = null,
+    val sourceLabel: String? = null,
+    /** For cards: {"tool": "...", "args": {...}} */
+    val cardJson: String? = null,
+    val cardState: String? = null,
+    val streaming: Boolean = false,
+)
+
+@Entity(tableName = "feed", indices = [Index("createdAt")])
+data class FeedCard(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val eventId: Long? = null,
+    val emoji: String,
+    val title: String,
+    val body: String,
+    val bulletsJson: String = "[]",
+    val reason: String = "",
+    /** [{"title": "...", "url": "..."}] */
+    val sourcesJson: String = "[]",
+    /** ["https://..."] */
+    val imagesJson: String = "[]",
+    val sourceLabel: String = "",
+    val createdAt: Long,
+    val liked: Boolean = false,
+    val dismissed: Boolean = false,
+)
+
+/** "模型记的": profile facts the model maintains. The user-authored profile lives in Settings and is never touched. */
+@Entity(tableName = "memory")
+data class MemoryEntry(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val text: String,
+    val source: String,
+    val createdAt: Long,
+    val updatedAt: Long,
+)
+
+@Entity(tableName = "profile_log")
+data class ProfileLog(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val time: Long,
+    val summary: String,
+)
+
+/** Per-app switch. Every app defaults to enabled (user decision: send everything). */
+@Entity(tableName = "app_rules")
+data class AppRule(
+    @PrimaryKey val pkg: String,
+    val appName: String,
+    val enabled: Boolean = true,
+    val count: Int = 0,
+    val lastSeen: Long = 0,
+)

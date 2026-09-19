@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <!--
+            Test entry for adb only. Guarded by DUMP, which the shell holds and ordinary apps cannot get, so nothing
+            else on the phone can inject chat messages or spend API credit through it. Debug source set: never in release.
+        -->
+        <receiver
+            android:name=".debug.DebugReceiver"
+            android:exported="true"
+            android:permission="android.permission.DUMP">
+            <intent-filter>
+                <action android:name="com.logan.spellmini.DEBUG_SEND" />
+                <action android:name="com.logan.spellmini.DEBUG_NOTIFY" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>
