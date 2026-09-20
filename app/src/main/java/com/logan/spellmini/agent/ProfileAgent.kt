@@ -3,6 +3,7 @@ package com.logan.spellmini.agent
 import android.util.Log
 import com.logan.spellmini.data.AppDb
 import com.logan.spellmini.data.MemoryEntry
+import com.logan.spellmini.data.MemorySource
 import com.logan.spellmini.data.MsgKind
 import com.logan.spellmini.data.MsgRole
 import com.logan.spellmini.data.ProfileLog
@@ -50,7 +51,8 @@ class ProfileAgent(
     suspend fun run(trigger: String): String = lock.withLock {
         running.value = true
         try {
-            val entries = db.memory().list()
+            // Followed topics are the user's own instructions to the feed, not facts to be rewritten or pruned.
+            val entries = db.memory().list().filter { it.source != MemorySource.FOLLOW }
             val events = db.events().recentJudged(80)
             val userLines = db.messages().lastN(60).filter { it.role == MsgRole.USER && it.kind == MsgKind.TEXT }.takeLast(30)
             val prompt = """

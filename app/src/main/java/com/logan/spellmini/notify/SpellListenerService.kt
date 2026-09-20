@@ -20,6 +20,9 @@ data class RawNotification(
     val ongoing: Boolean,
     val groupSummary: Boolean,
     val synthetic: Boolean = false,
+    /** Conversation notifications only: time of the newest message they carry, and whether the user wrote it. */
+    val latestMessageAt: Long? = null,
+    val latestFromUser: Boolean = false,
 )
 
 class SpellListenerService : NotificationListenerService() {
@@ -50,8 +53,16 @@ class SpellListenerService : NotificationListenerService() {
         val raw = runCatching { extract(sbn) }
             .onFailure { Log.w(TAG, "extract failed for ${sbn.packageName}", it) }
             .getOrNull() ?: return
-        Graph.pipeline.ingest(raw, sbn.notification.contentIntent)
+        Graph.pipeline.ingest(raw, sbn.notification.contentIntent, replyAction(sbn.notification))
     }
+
+    /**
+     * The "reply" button chat apps put on their notifications: an action with a free-text RemoteInput. Firing it with
+     * the text filled in sends the message in that exact conversation, without opening the app. Neither WeChat nor
+     * Feishu offers a deep link that opens a given chat with a draft in it, so this is the only one-tap route.
+     */
+    private fun replyAction(n: Notification): Notification.Action? =
+        n.actions?.firstOrNull { action -> action.actionIntent != null && action.remoteInputs?.any { it.allowFreeFormInput } == true }
 
     private fun extract(sbn: StatusBarNotification): RawNotification {
         val n = sbn.notification
@@ -63,8 +74,11 @@ class SpellListenerService : NotificationListenerService() {
         ).firstOrNull { !it.isNullOrBlank() }?.toString().orEmpty()
 
         // MessagingStyle carries the recent turns of a conversation, which is far more useful than the one-line text.
-        val messaging = runCatching { NotificationCompat.MessagingStyle.extractMessagingStyleFromNotification(n) }
-            .getOrNull()?.messages.orEmpty().takeLast(MAX_MESSAGES)
+        val style = runCatching { NotificationCompat.MessagingStyle.extractMessagingStyleFromNotification(n) }.getOrNull()
+        val newest = style?.messages?.maxByOrNull { it.timestamp }
+        // By the platform's convention a message with no sender is the user's own; some apps name the user instead.
+        val newestIsMine = newest != null && (newest.person == null || newest.person?.name == style.user.name)
+        val messaging = style?.messages.orEmpty().takeLast(MAX_MESSAGES)
             .mapNotNull { m ->
                 val body = m.text?.toString()?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
                 val sender = m.person?.name?.toString()
@@ -92,6 +106,8 @@ class SpellListenerService : NotificationListenerService() {
             postedAt = sbn.postTime,
             ongoing = sbn.isOngoing || (n.flags and Notification.FLAG_FOREGROUND_SERVICE) != 0,
             groupSummary = (n.flags and Notification.FLAG_GROUP_SUMMARY) != 0,
+            latestMessageAt = newest?.timestamp?.takeIf { it > 0 },
+            latestFromUser = newestIsMine,
         )
     }
 
@@ -104,6 +120,11 @@ class SpellListenerService : NotificationListenerService() {
         private const val MAX_TEXT = 2_000
         private const val MAX_MESSAGES = 6
         private const val INITIAL_SWEEP_LIMIT = 30
+
+        /** Quick-reply actions of recent notifications. In memory only: the PendingIntent inside cannot be stored. */
+        val replyActions = object : LinkedHashMap<Long, Notification.Action>(64, 0.75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Long, Notification.Action>?) = size > 200
+        }
 
         /** Content intents of recent notifications, so "打开原通知" can jump to the exact source screen. */
         val contentIntents = object : LinkedHashMap<Long, PendingIntent>(64, 0.75f, true) {

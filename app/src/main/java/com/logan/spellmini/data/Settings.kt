@@ -160,6 +160,11 @@ class Settings(context: Context) {
         get() = prefs.getBoolean("greeted", false)
         set(value) = edit { putBoolean("greeted", value) }
 
+    /** One-time: notifications from other assistant apps were switched off by default (the user can switch them back on). */
+    var assistantAppsQuieted: Boolean
+        get() = prefs.getBoolean("assistantAppsQuieted", false)
+        set(value) = edit { putBoolean("assistantAppsQuieted", value) }
+
     var criteria: Criteria
         get() = Criteria(
             instructions = prefs.getString("c_instructions", null) ?: Criteria.DEFAULT.instructions,

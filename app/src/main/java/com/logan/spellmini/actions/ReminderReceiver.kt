@@ -9,23 +9,28 @@ import com.logan.spellmini.data.MsgRole
 import com.logan.spellmini.notify.Notifier
 import kotlinx.coroutines.launch
 
-/** Fires when a reminder the user approved comes due: speak up in chat and buzz. */
+/**
+ * Fires when a timed item comes due. A plain reminder speaks up in chat and buzzes. A scheduled task is handed to the
+ * chat agent, which does the work (searching, summarising) and reports: that is what makes "周一 18:00 我整理一份发你" true.
+ */
 class ReminderReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         val text = intent.getStringExtra(EXTRA_TEXT).orEmpty().ifBlank { return }
-        val pending = goAsync()
+        val doIt = intent.getBooleanExtra(EXTRA_DO_IT, false)
+        // The work can take a minute, far longer than a receiver may run. The process stays alive on its own (bound
+        // notification listener plus a foreground service), so the receiver only hands over and returns.
         Graph.scope.launch {
-            try {
-                val message = "⏰ 到点了：$text"
-                Graph.db.messages().insert(ChatMsg(role = MsgRole.ASSISTANT, text = message, createdAt = System.currentTimeMillis()))
+            if (doIt) {
+                Graph.chat.onScheduled(text)
+            } else {
+                Graph.db.messages().insert(ChatMsg(role = MsgRole.ASSISTANT, text = "⏰ 到点了：$text", createdAt = System.currentTimeMillis()))
                 Notifier.proactive(context, title = "提醒", text = text, alert = true)
-            } finally {
-                pending.finish()
             }
         }
     }
 
     companion object {
         const val EXTRA_TEXT = "text"
+        const val EXTRA_DO_IT = "do_it"
     }
 }

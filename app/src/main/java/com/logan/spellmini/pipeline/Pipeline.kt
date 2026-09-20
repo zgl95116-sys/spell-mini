@@ -1,7 +1,9 @@
 package com.logan.spellmini.pipeline
 
+import android.app.Notification
 import android.app.PendingIntent
 import android.util.Log
+import com.logan.spellmini.Graph
 import com.logan.spellmini.data.AppDb
 import com.logan.spellmini.data.AppRule
 import com.logan.spellmini.data.Criteria
@@ -77,10 +79,19 @@ class Pipeline(
     private val chatGate = Mutex()
     private val lastSkipLog = HashMap<String, Long>()
 
-    fun ingest(raw: RawNotification, contentIntent: PendingIntent?) {
+    /** Newest message time seen per notification key; only touched under [lock]. */
+    private val newestSeen = HashMap<String, Long>()
+
+    fun ingest(raw: RawNotification, contentIntent: PendingIntent?, replyAction: Notification.Action? = null) {
         scope.launch {
-            runCatching { ingestLocked(raw, contentIntent) }.onFailure { Log.e(TAG, "ingest failed", it) }
+            runCatching { ingestLocked(raw, contentIntent, replyAction) }.onFailure { Log.e(TAG, "ingest failed", it) }
         }
+    }
+
+    /** The newest copy of a notification holds the handles that still work, so they replace the earlier ones. */
+    private fun keepHandles(eventId: Long, contentIntent: PendingIntent?, replyAction: Notification.Action?) {
+        contentIntent?.let { synchronized(SpellListenerService.contentIntents) { SpellListenerService.contentIntents[eventId] = it } }
+        replyAction?.let { synchronized(SpellListenerService.replyActions) { SpellListenerService.replyActions[eventId] = it } }
     }
 
     /** Debug panel entry: pushes a fake notification through the exact same path as a real one. */
@@ -118,19 +129,16 @@ class Pipeline(
         scope.launch { runCatching { judge(eventId) }.onFailure { Log.e(TAG, "rejudge failed", it) } }
     }
 
-    private suspend fun ingestLocked(raw: RawNotification, contentIntent: PendingIntent?) = lock.withLock {
+    private suspend fun ingestLocked(raw: RawNotification, contentIntent: PendingIntent?, replyAction: Notification.Action?) = lock.withLock {
         val now = System.currentTimeMillis()
-        val rule = db.appRules().get(raw.pkg)
-        if (!raw.synthetic) {
-            db.appRules().upsert(
-                (rule ?: AppRule(raw.pkg, raw.appName)).let { it.copy(appName = raw.appName, count = it.count + 1, lastSeen = now) }
-            )
-        }
+        // Another assistant's notifications start switched off (see Graph.OTHER_ASSISTANTS); everything else starts on.
+        val rule = db.appRules().get(raw.pkg) ?: AppRule(raw.pkg, raw.appName, enabled = raw.pkg !in Graph.OTHER_ASSISTANTS)
+        if (!raw.synthetic) db.appRules().upsert(rule.copy(appName = raw.appName, count = rule.count + 1, lastSeen = now))
 
-        val filterReason = localFilter(raw)
+        val filterReason = localFilter(raw) ?: repost(raw)
         val skip: Pair<String, String>? = when {
             filterReason != null -> EventStatus.FILTERED to filterReason
-            rule?.enabled == false -> EventStatus.APP_OFF to "该 App 已在设置中关闭"
+            !rule.enabled -> EventStatus.APP_OFF to "该 App 已在设置中关闭"
             !settings.pipelineEnabled -> EventStatus.FILTERED to "总开关已关闭"
             !api.hasKey -> EventStatus.ERROR to "安装包里没有 OpenRouter key"
             else -> null
@@ -143,6 +151,7 @@ class Pipeline(
         val existing = pending[raw.key]
         if (existing != null) {
             // Same notification updated while we were waiting: fold the new text in and restart the quiet window.
+            keepHandles(existing.eventId, contentIntent, replyAction)
             if (!existing.lines.addAll(linesOf(raw.text))) return@withLock
             existing.updates += 1
             db.events().get(existing.eventId)?.let {
@@ -165,7 +174,7 @@ class Pipeline(
                 category = raw.category, postedAt = raw.postedAt, synthetic = raw.synthetic, status = EventStatus.QUEUED,
             )
         )
-        contentIntent?.let { synchronized(SpellListenerService.contentIntents) { SpellListenerService.contentIntents[id] = it } }
+        keepHandles(id, contentIntent, replyAction)
         val entry = Pending(id, now, LinkedHashSet(linesOf(raw.text)))
         pending[raw.key] = entry
         schedule(raw.key, entry)
@@ -195,6 +204,26 @@ class Pipeline(
             lock.withLock { if (pending[key] === entry) pending.remove(key) }
             runCatching { judge(entry.eventId) }.onFailure { Log.e(TAG, "judge failed", it) }
         }
+    }
+
+    /**
+     * Messaging apps rebuild their whole notification group whenever one message arrives: every unread conversation is
+     * posted again, word for word, and after a quick reply the conversation comes back with the user's own line on top.
+     * On the test phone one new SMS re-posted nine conversations and each was treated as news. A conversation is only
+     * news when its newest message is someone else's and is newer than the last time we handled that conversation.
+     */
+    private suspend fun repost(raw: RawNotification): String? {
+        val newestAt = raw.latestMessageAt ?: return null
+        if (raw.latestFromUser) return "最新一条是你自己发的"
+        // Exact while the process lives: the same newest message again means nothing new.
+        val seen = newestSeen[raw.key]
+        if (newestSeen.size > 500) newestSeen.clear()
+        newestSeen[raw.key] = maxOf(seen ?: 0L, newestAt)
+        if (seen != null) return if (newestAt <= seen) REPOSTED else null
+        // After a restart only the trace is left. Two messages seconds apart can carry timestamps on either side of
+        // the moment the first was handled, hence the margin.
+        val handledAt = db.events().lastHandledAt(raw.pkg, raw.title) ?: return null
+        return if (newestAt + RESTART_MARGIN_MS <= handledAt) REPOSTED else null
     }
 
     private fun localFilter(raw: RawNotification): String? = when {
@@ -239,10 +268,14 @@ class Pipeline(
 
         var finalRoute = event.route ?: Route.REVIEW
         var note: String? = null
-        if (finalRoute == Route.REVIEW) {
+        // JEV is there to protect recall. "ignore" by a nose (a colleague's @-mention came out ignore 0.54 / chat 0.46)
+        // is not a verdict to drop a notification on; on a real phone this happened about twice a day.
+        val chatChance = verdict.getOrNull()?.answers?.obj("route")?.obj("probabilities")?.dbl(Route.CHAT) ?: 0.0
+        val closeCall = finalRoute == Route.IGNORE && chatChance >= CLOSE_CALL
+        if (finalRoute == Route.REVIEW || closeCall) {
             val second = onSecondJudge?.let { judgeFn -> runCatching { judgeFn(event) }.getOrNull() }
             finalRoute = second?.first ?: Route.IGNORE
-            note = second?.second ?: "二判不可用，按忽略处理"
+            note = (if (closeCall) "JEV 判忽略但 chat 概率 ${"%.2f".format(chatChance)}，交主模型复核：" else "") + (second?.second ?: "二判不可用，按忽略处理")
         }
         // Chat turns run one at a time, so a verdict can wait a while; say so instead of leaving the row blank.
         val waiting = finalRoute == Route.CHAT || finalRoute == Route.FEED
@@ -339,7 +372,12 @@ class Pipeline(
         private const val RECOVER_WINDOW_MS = 600_000L
         private const val RETENTION_MS = 14 * DAY_MS
         private const val CLOCK_PATTERN = "yyyy-MM-dd HH:mm EEEE"
+        private const val CLOSE_CALL = 0.40
+        private const val RESTART_MARGIN_MS = 60_000L
+        private const val REPOSTED = "没有新消息，只是被 App 重新贴出"
         private val SYSTEM_NOISE = setOf("android", "com.android.systemui")
-        private val NOISY_CATEGORIES = setOf("transport", "progress", "service", "sys", "navigation", "stopwatch", "workout")
+        // "call" is the ringing or ongoing call itself: by the time a model has looked at it, it is over. Missed calls
+        // arrive under their own category and still go through.
+        private val NOISY_CATEGORIES = setOf("transport", "progress", "service", "sys", "navigation", "stopwatch", "workout", "call")
     }
 }

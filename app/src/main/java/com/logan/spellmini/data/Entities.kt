@@ -84,6 +84,18 @@ object CardState {
     const val APPROVED = "approved"
     const val DENIED = "denied"
     const val FAILED = "failed"
+
+    // On a note row: the action ran directly, with no card. UNDONE means the user took it back afterwards.
+    const val DONE = "done"
+    const val UNDONE = "undone"
+}
+
+/** Values of [MemoryEntry.source] that carry meaning beyond "where this came from". */
+object MemorySource {
+    const val CHAT = "聊天"
+
+    /** A topic the user asked the feed to keep following. Not a fact about the user, so the profile agent leaves it alone. */
+    const val FOLLOW = "关注"
 }
 
 @Entity(tableName = "messages", indices = [Index("createdAt")])

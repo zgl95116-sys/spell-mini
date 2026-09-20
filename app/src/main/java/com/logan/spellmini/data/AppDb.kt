@@ -34,6 +34,10 @@ interface EventDao {
     @Query("SELECT COUNT(*) FROM events WHERE pkg = :pkg AND title = :title AND text = :text AND postedAt >= :since")
     suspend fun countSame(pkg: String, title: String, text: String, since: Long): Int
 
+    /** When a conversation (same app, same title) last went through the pipeline; null if it never did. */
+    @Query("SELECT MAX(postedAt) FROM events WHERE pkg = :pkg AND title = :title AND status IN ('QUEUED', 'JUDGED', 'ERROR')")
+    suspend fun lastHandledAt(pkg: String, title: String): Long?
+
     @Query("SELECT COUNT(*) FROM events WHERE outcome = :outcome AND postedAt >= :since")
     suspend fun countOutcomeSince(outcome: String, since: Long): Int
 
@@ -79,6 +83,13 @@ interface MessageDao {
     @Query("SELECT * FROM messages WHERE kind = 'card' ORDER BY id DESC LIMIT :limit")
     suspend fun recentCards(limit: Int): List<ChatMsg>
 
+    /** Everything the assistant did or proposed to do: confirm cards plus the notes left by directly executed actions. */
+    @Query("SELECT * FROM messages WHERE cardJson IS NOT NULL AND kind IN ('card', 'note') ORDER BY id DESC LIMIT :limit")
+    suspend fun recentActions(limit: Int): List<ChatMsg>
+
+    @Query("UPDATE messages SET cardJson = :json WHERE id = :id")
+    suspend fun setAttachments(id: Long, json: String)
+
     @Query("UPDATE messages SET text = :text, streaming = :streaming WHERE id = :id")
     suspend fun setText(id: Long, text: String, streaming: Boolean)
 
@@ -108,6 +119,10 @@ interface FeedDao {
     @Query("SELECT title FROM feed ORDER BY createdAt DESC LIMIT :limit")
     suspend fun recentTitles(limit: Int): List<String>
 
+    /** Includes cards he removed: something he did not want once should not come back reworded. */
+    @Query("SELECT * FROM feed ORDER BY createdAt DESC LIMIT :limit")
+    suspend fun recentForDedupe(limit: Int): List<FeedCard>
+
     @Query("SELECT sourcesJson FROM feed ORDER BY createdAt DESC LIMIT :limit")
     suspend fun recentSources(limit: Int): List<String>
 
@@ -132,6 +147,10 @@ interface MemoryDao {
     suspend fun setText(id: Long, text: String, now: Long)
 
     @Query("DELETE FROM memory WHERE id = :id") suspend fun delete(id: Long)
+
+    /** Topics the user asked to keep an eye on are stored as memory entries with this source. */
+    @Query("SELECT * FROM memory WHERE source = :source ORDER BY updatedAt DESC") suspend fun bySource(source: String): List<MemoryEntry>
+    @Query("SELECT * FROM memory WHERE source = :source ORDER BY updatedAt DESC") fun watchBySource(source: String): Flow<List<MemoryEntry>>
 
     @Insert suspend fun log(entry: ProfileLog): Long
     @Query("SELECT * FROM profile_log ORDER BY time DESC LIMIT 30") fun logs(): Flow<List<ProfileLog>>

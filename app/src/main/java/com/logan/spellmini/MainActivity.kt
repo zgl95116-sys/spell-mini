@@ -72,6 +72,16 @@ class MainActivity : ComponentActivity() {
         setContent { SpellTheme { Root(openChatSignal.value) } }
     }
 
+    override fun onResume() {
+        super.onResume()
+        Graph.appInForeground.value = true
+    }
+
+    override fun onPause() {
+        Graph.appInForeground.value = false
+        super.onPause()
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         if (intent.getBooleanExtra(EXTRA_OPEN_CHAT, false)) openChatSignal.value += 1

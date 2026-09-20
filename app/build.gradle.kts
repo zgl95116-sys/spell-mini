@@ -23,8 +23,11 @@ android {
         applicationId = "com.logan.spellmini"
         minSdk = 26
         targetSdk = 34
-        versionCode = 5
-        versionName = "0.5"
+        versionCode = 7
+        versionName = "0.6.1"
+        // Comma-separated packages whose notifications start switched off (the per-app switch turns them back on).
+        // Meant for other assistant apps on the same phone; which ones is local knowledge, so it lives in local.properties.
+        buildConfigField("String", "QUIET_PACKAGES", "\"${secret("QUIET_PACKAGES")}\"")
     }
 
     buildTypes {

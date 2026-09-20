@@ -4,6 +4,7 @@ import com.logan.spellmini.BuildConfig
 import com.logan.spellmini.data.Settings
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
@@ -86,7 +87,20 @@ class OpenRouter(private val settings: Settings) {
         })
     }
 
-    private suspend fun postJson(client: OkHttpClient, request: Request): JsonObject {
+    /**
+     * One retry for failures that are usually momentary: a dropped connection, a DNS hiccup on a phone switching
+     * networks, a gateway error. On a real phone six verdicts in a day were lost to exactly these, with no second try.
+     */
+    private suspend fun postJson(client: OkHttpClient, request: Request): JsonObject =
+        try {
+            postOnce(client, request)
+        } catch (error: IOException) {
+            if (error is ApiException && error.code !in RETRYABLE_CODES) throw error
+            delay(RETRY_DELAY_MS)
+            postOnce(client, request)
+        }
+
+    private suspend fun postOnce(client: OkHttpClient, request: Request): JsonObject {
         val response = client.newCall(request).await()
         return withContext(Dispatchers.IO) {
             response.use {
@@ -296,6 +310,8 @@ class OpenRouter(private val settings: Settings) {
     companion object {
         const val BASE = "https://openrouter.ai"
         private const val HTML_HEAD_BYTES = 200_000L
+        private const val RETRY_DELAY_MS = 800L
+        private val RETRYABLE_CODES = setOf(408, 425, 429, 500, 502, 503, 504)
         private val OG_PATTERNS = listOf(
             Regex("""<meta[^>]+property=["']og:image(?::secure_url)?["'][^>]*content=["']([^"']+)["']""", RegexOption.IGNORE_CASE),
             Regex("""<meta[^>]+content=["']([^"']+)["'][^>]*property=["']og:image["']""", RegexOption.IGNORE_CASE),

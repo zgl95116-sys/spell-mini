@@ -12,6 +12,7 @@
             <intent-filter>
                 <action android:name="com.logan.spellmini.DEBUG_SEND" />
                 <action android:name="com.logan.spellmini.DEBUG_NOTIFY" />
+                <action android:name="com.logan.spellmini.DEBUG_PROFILE" />
             </intent-filter>
         </receiver>
     </application>
