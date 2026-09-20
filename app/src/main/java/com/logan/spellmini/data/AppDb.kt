@@ -90,6 +90,8 @@ interface MessageDao {
     @Query("UPDATE messages SET streaming = 0 WHERE streaming = 1") suspend fun clearStaleStreaming()
 
     @Query("DELETE FROM messages") suspend fun clear()
+
+    @Query("SELECT * FROM messages ORDER BY id ASC") suspend fun everything(): List<ChatMsg>
 }
 
 @Dao
@@ -100,6 +102,8 @@ interface FeedDao {
     fun visible(): Flow<List<FeedCard>>
 
     @Query("SELECT * FROM feed WHERE id = :id") suspend fun get(id: Long): FeedCard?
+
+    @Query("SELECT * FROM feed ORDER BY id ASC") suspend fun everything(): List<FeedCard>
 
     @Query("SELECT title FROM feed ORDER BY createdAt DESC LIMIT :limit")
     suspend fun recentTitles(limit: Int): List<String>
@@ -131,6 +135,8 @@ interface MemoryDao {
 
     @Insert suspend fun log(entry: ProfileLog): Long
     @Query("SELECT * FROM profile_log ORDER BY time DESC LIMIT 30") fun logs(): Flow<List<ProfileLog>>
+
+    @Query("SELECT * FROM profile_log ORDER BY time ASC") suspend fun allLogs(): List<ProfileLog>
 }
 
 @Dao
@@ -138,6 +144,8 @@ interface AppRuleDao {
     @Query("SELECT * FROM app_rules WHERE pkg = :pkg") suspend fun get(pkg: String): AppRule?
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun upsert(rule: AppRule)
     @Query("SELECT * FROM app_rules ORDER BY count DESC") fun all(): Flow<List<AppRule>>
+
+    @Query("SELECT * FROM app_rules ORDER BY count DESC") suspend fun list(): List<AppRule>
     @Query("UPDATE app_rules SET enabled = :enabled WHERE pkg = :pkg") suspend fun setEnabled(pkg: String, enabled: Boolean)
 }
 

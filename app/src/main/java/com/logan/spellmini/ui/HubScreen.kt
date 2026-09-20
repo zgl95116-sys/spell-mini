@@ -114,6 +114,11 @@ private fun TraceTab() {
 
     Column(Modifier.fillMaxSize()) {
         TodaySummary(events)
+        // Kept out of the scrolling filter row below: at its far end nobody would find it.
+        Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Pill("导出完整数据", Ink.Blue, filled = true) { scope.launch { exportEverything(context) } }
+            Pill("只导出流水 JSONL", Ink.Blue) { scope.launch { exportTrace(context) } }
+        }
         Row(
             Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 8.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -122,7 +127,6 @@ private fun TraceTab() {
             traceFilters.forEach { name ->
                 Pill("$name ${events.count { it.matches(name) }}", Ink.Black, filled = filter == name) { filter = name }
             }
-            Pill("导出 JSONL", Ink.Blue) { scope.launch { exportTrace(context) } }
         }
         val shown = events.filter { it.matches(filter) }
         if (shown.isEmpty()) {
@@ -302,6 +306,74 @@ private fun eventJson(event: NotifEvent): JsonObject = buildJsonObject {
 private fun copy(context: Context, text: String) {
     context.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("spell-mini", text))
     Toast.makeText(context, "已复制", Toast.LENGTH_SHORT).show()
+}
+
+private fun parsed(jsonText: String?) = jsonText?.let { runCatching { Json.parseToJsonElement(it) }.getOrNull() } ?: kotlinx.serialization.json.JsonNull
+
+/**
+ * One JSON file with everything a review needs: the trace, what the assistant actually said and which cards it made,
+ * the feed cards in full, the profile and the settings in force. The API key lives in BuildConfig and is never included.
+ */
+private suspend fun exportEverything(context: Context) {
+    val file = withContext(Dispatchers.IO) {
+        val settings = Graph.settings
+        val criteria = settings.criteria
+        val bundle = buildJsonObject {
+            put("exported_at", System.currentTimeMillis())
+            put("app_version", com.logan.spellmini.BuildConfig.VERSION_NAME)
+            put("settings", buildJsonObject {
+                put("jev_model", settings.jevModel); put("chat_model", settings.chatModel)
+                put("criteria_version", criteria.version)
+                put("criteria", buildJsonObject {
+                    put("instructions", criteria.instructions); put("chat", criteria.chat); put("feed", criteria.feed)
+                    put("ignore", criteria.ignore); put("review", criteria.review)
+                })
+                put("pipeline_enabled", settings.pipelineEnabled)
+                put("quiet_window_ms", settings.quietWindowMs); put("max_wait_ms", settings.maxWaitMs)
+                put("chat_per_hour_cap", settings.chatPerHourCap); put("feed_per_day_cap", settings.feedPerDayCap)
+                put("alert_urgency", settings.alertUrgencyTenths / 10.0); put("must_speak_when_urgent", settings.mustSpeakWhenUrgent)
+                put("interest_feed_enabled", settings.interestFeedEnabled); put("interest_interval_min", settings.interestIntervalMin)
+                put("interest_batch_size", settings.interestBatchSize); put("interest_per_day_cap", settings.interestPerDayCap)
+                put("auto_profile", settings.autoProfile)
+            })
+            put("profile", buildJsonObject {
+                put("user_written", settings.userProfile)
+                put("learned", kotlinx.serialization.json.JsonArray(Graph.db.memory().list().map {
+                    buildJsonObject { put("id", it.id); put("text", it.text); put("source", it.source); put("updated_at", it.updatedAt) }
+                }))
+                put("log", kotlinx.serialization.json.JsonArray(Graph.db.memory().allLogs().map {
+                    buildJsonObject { put("time", it.time); put("summary", it.summary) }
+                }))
+            })
+            put("events", kotlinx.serialization.json.JsonArray(Graph.db.events().all().map { eventJson(it) }))
+            put("messages", kotlinx.serialization.json.JsonArray(Graph.db.messages().everything().map {
+                buildJsonObject {
+                    put("id", it.id); put("role", it.role); put("kind", it.kind); put("text", it.text)
+                    put("created_at", it.createdAt); put("event_id", it.eventId); put("source_label", it.sourceLabel)
+                    put("card", parsed(it.cardJson)); put("card_state", it.cardState)
+                }
+            }))
+            put("feed", kotlinx.serialization.json.JsonArray(Graph.db.feed().everything().map {
+                buildJsonObject {
+                    put("id", it.id); put("event_id", it.eventId); put("emoji", it.emoji); put("title", it.title)
+                    put("body", it.body); put("bullets", parsed(it.bulletsJson)); put("reason", it.reason)
+                    put("sources", parsed(it.sourcesJson)); put("images", parsed(it.imagesJson))
+                    put("source_label", it.sourceLabel); put("created_at", it.createdAt)
+                    put("liked", it.liked); put("dismissed", it.dismissed)
+                }
+            }))
+            put("apps", kotlinx.serialization.json.JsonArray(Graph.db.appRules().list().map {
+                buildJsonObject { put("package", it.pkg); put("name", it.appName); put("enabled", it.enabled); put("count", it.count) }
+            }))
+        }
+        val dir = File(context.cacheDir, "exports").apply { mkdirs() }
+        val stamp = java.text.SimpleDateFormat("yyyyMMdd-HHmm", java.util.Locale.US).format(java.util.Date())
+        File(dir, "spell-mini-export-$stamp.json").apply { writeText(bundle.toString()) }
+    }
+    val uri = FileProvider.getUriForFile(context, "com.logan.spellmini.files", file)
+    val send = Intent(Intent.ACTION_SEND).setType("application/json").putExtra(Intent.EXTRA_STREAM, uri)
+        .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    context.startActivity(Intent.createChooser(send, "导出完整数据").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
 }
 
 /** Writes the whole trace as JSONL and hands it to the share sheet; nothing leaves the phone unless the user picks a target. */
