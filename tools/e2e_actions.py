@@ -127,6 +127,17 @@ def pending_reminders():
 def has_pkg(pkg): return pkg in adb("shell", "pm", "list", "packages", pkg)
 
 
+def ensure_default_launcher():
+    """With two launchers installed and no default, every HOME press raises "Select a Home app", which then sits on
+    top of the chat and swallows the taps of later cases. It looked like buttons that did not respond."""
+    if "ResolverActivity" not in adb("shell", "cmd package resolve-activity -c android.intent.category.HOME -a android.intent.action.MAIN"): return
+    adb("shell", "cmd", "package", "set-home-activity", "com.google.android.apps.nexuslauncher/.NexusLauncherActivity")
+    adb("shell", "input", "keyevent", "KEYCODE_BACK")
+    if "ResolverActivity" in adb("shell", "cmd package resolve-activity -c android.intent.category.HOME -a android.intent.action.MAIN"):
+        print("WARNING: no default launcher on this device; the HOME chooser may cover the app and block taps", flush=True)
+
+
+ensure_default_launcher()
 R = random.randint(10, 49)
 ALARM = f"设一个早上5点{R}分的闹钟，备注游泳{R}"
 FAKE = re.compile(r"\[确认卡|【确认卡|\[系统记录|【系统记录|\[我主动发的|\[NOCLAIM|\[SILENT|\[静默")
@@ -311,6 +322,7 @@ CALLBACKS = [
     ("4S店小李", ("保养", "取车", "4S"), "您好，您的爱车保养已完成，请于今天 18:00 前到店取车，有问题联系服务顾问小李 132{n}。"),
     ("搬家赵师傅", ("搬家", "赵师傅", "电梯"), "您好，我是搬家公司的赵师傅，您约的周六上午搬家我们需要提前确认楼层和电梯情况，麻烦回个电话：130{n}。"),
     ("驾校孙教练", ("驾校", "练车", "教练"), "【东方时尚驾校】您预约的科目二练车时间有调整，请尽快联系教练孙师傅确认新时间：134{n}。"),
+    ("燃气公司", ("燃气", "安检", "上门"), "【北京燃气】您家的年度入户安检约在本周六上午 9 点到 11 点，请留人在家；需要改期请在周五 18:00 前致电安检员周师傅 130{n}。"),
 ]
 
 
@@ -322,7 +334,8 @@ def case_trigger_button():
     # emulator has not seen recently.
     recent = " ".join(r["title"] for r in db(f"select title from events where postedAt > {int(time.time() * 1000) - 6 * 3600_000}"))
     fresh = [c for c in CALLBACKS if c[0] not in recent] or CALLBACKS
-    name, keywords, template = random.choice(fresh)
+    forced = [c for c in CALLBACKS if c[0] == os.environ.get("SPELL_E2E_SCENARIO")]
+    name, keywords, template = random.choice(forced or fresh)
     title = f"{name}{R}"
     notify("短信", title, template.format(n=random.randint(10000000, 99999999)))
     event = wait_event(ev, title)
@@ -335,9 +348,9 @@ def case_trigger_button():
     spoke = bool(event) and event["outcome"] == "CHAT_SENT"
     on_topic = any(k in said(rows) for k in keywords)  # a derailed turn once answered a plumber's text with news about a parcel
     # Every scenario used up within six hours: silence about a repeated matter is the designed behaviour, not a failure.
-    repeated = len(fresh) == len(CALLBACKS) and name in recent and bool(event) and event["outcome"] == "CHAT_SILENT"
+    repeated = name in recent and bool(event) and event["outcome"] in ("CHAT_SILENT", "NONE")  # silent, or ignored by JEV as a repeat
     ok = repeated or (spoke and on_topic and (not offered or tapped))
-    record("通知·后台动作变按钮", ok, f"场景={name}{'（6 小时内说过，沉默属正常）' if repeated else ''} 结果={event and event['outcome']} 说的是这件事={on_topic} 按钮={[b['label'] for b in offered]} 点击后生效={tapped}", rows)
+    record("通知·后台动作变按钮", ok, f"场景={name}{'（6 小时内出现过，沉默或忽略属正常）' if repeated else ''} 结果={event and event['outcome']} 说的是这件事={on_topic} 按钮={[b['label'] for b in offered]} 点击后生效={tapped}", rows)
     adb("shell", "input", "keyevent", "KEYCODE_HOME")
 
 
@@ -369,13 +382,78 @@ def case_reply():
         outbox = adb("shell", "content", "query", "--uri", "content://sms/sent", "--projection", "address:body")
         sent = drafts[0]["args"]["text"][:8] in outbox
     direct = bool(drafts) and drafts[0]["args"].get("direct") is True
-    record("通知·拟好回复一键发出", bool(drafts) and direct and sent, f"结果={event and event['outcome']} 回复按钮={[d['args']['text'] for d in drafts]} 走快捷回复={direct} 系统短信已发出={sent}", rows)
+    closed = None
+    if sent and event:
+        time.sleep(6)  # the SMS app posts the conversation again with his own line on top; that is the "replied" signal
+        closed = [payload(r).get("handled") for r in db(ROWS.format(base)) if r["eventId"] == event["id"] and r["kind"] == "text"]
+    record("通知·拟好回复一键发出", bool(drafts) and direct and sent and closed == ["replied"], f"结果={event and event['outcome']} 回复按钮={[d['args']['text'] for d in drafts]} 走快捷回复={direct} 系统短信已发出={sent} 消息标为={closed}", rows)
     adb("shell", "input", "keyevent", "KEYCODE_HOME")
+
+
+def fresh_question():
+    day = random.choice(["周五晚上", "周六上午", "周六下午", "周日上午", "周日下午", "下周一晚上"])
+    place = random.choice(["三里屯", "望京", "五道口", "国贸", "西单", "中关村", "亦庄", "通州"])
+    activity = random.choice(["吃火锅", "看电影", "爬香山", "打网球", "去宜家转转", "看展", "钓鱼", "骑车", "露营", "吃烤鸭", "打台球", "泡温泉"])
+    return f"{day}一起去{place}{activity}吗？来不来回我一下"
+
+
+def case_already_opened():
+    """He taps the notification before the assistant gets to it: nothing must be said, and the tap must be on record."""
+    ev = db("select coalesce(max(id),0) m from events")[0]["m"]
+    base = db("select coalesce(max(id),0) m from messages")[0]["m"]
+    adb("shell", "input", "keyevent", "KEYCODE_HOME"); time.sleep(1)
+    ask = fresh_question()
+    adb("emu", "sms", "send", f"135{random.randint(10000000, 99999999)}", ask)
+    time.sleep(2)
+    adb("shell", "cmd", "statusbar", "expand-notifications"); time.sleep(1.5)
+    spots = find(ui(), prefix=ask[:6])
+    if spots: tap(*spots[0])
+    event, end = None, time.time() + 220
+    while time.time() < end and not event:
+        time.sleep(5)
+        rows = db(f"select id, sbnKey, postedAt, finalRoute, outcome, outcomeNote from events where id>{ev} and text like '%{ask[:8]}%' and status='JUDGED' and coalesce(outcome,'PENDING')!='PENDING' order by id desc limit 1")
+        event = rows[0] if rows else None
+    adb("shell", "input", "keyevent", "KEYCODE_HOME")
+    seen = db(f"select filterReason from events where status='SEEN' and sbnKey='{event['sbnKey']}' and postedAt>={event['postedAt']}") if event else []
+    spoken = [r for r in db(ROWS.format(base)) if event and r["eventId"] == event["id"] and r["kind"] == "text"]
+    marked = [payload(r).get("handled") for r in spoken]
+    # Either it stayed quiet because he had already opened it, or the tap came after the message and the message got marked.
+    quiet = bool(event) and not spoken and event["outcome"] in ("CHAT_SILENT", "NONE")
+    ok = bool(spots) and bool(seen) and (quiet or any(marked))
+    record("通知·你已经点开了", ok, f"点到通知={bool(spots)} 记录到={[s['filterReason'] for s in seen]} 结果={event and event['outcome']}（{((event or {}).get('outcomeNote') or '')[:24]}）消息上的标记={marked}", spoken)
+
+
+def case_feedback_rule():
+    """'别再提这类' must become a rule in the profile that he can read, and taking it back must delete it."""
+    before = {r["id"] for r in db("select id from memory where source='规则'")}
+    base = db("select coalesce(max(id),0) m from messages")[0]["m"]
+    # One tap only, on the newest message: older messages carry the same two words, so a retry would hit those.
+    focus_app(); time.sleep(1.5)
+    spots = find(ui(), text="别再提这类")
+    ok_tap = bool(spots)
+    if spots: tap(*max(spots, key=lambda p: p[1]))
+    rows, rule = [], None
+    end = time.time() + 60
+    while time.time() < end and not rule:
+        time.sleep(4)
+        new = [r for r in db("select id, text from memory where source='规则'") if r["id"] not in before]
+        rule = new[0] if new else None
+    rows = db(ROWS.format(base))
+    note = [r for r in rows if r["kind"] == "note" and payload(r).get("tool") == "feedback_rule"]
+    removed = False
+    if rule and note:
+        focus_app(); time.sleep(1)
+        spots = find(ui(), text="撤销")
+        if spots:
+            tap(*max(spots, key=lambda p: p[1])); time.sleep(2)
+            removed = not db(f"select id from memory where id={rule['id']}")
+    record("反馈·别再提这类", bool(rule) and bool(note) and removed, f"点到={ok_tap} 规则={rule and rule['text']} 聊天里有记录={bool(note)} 撤销后规则已删={removed}", rows)
 
 
 SPECIAL = [
     ("提醒 + 撤销", case_reminder_and_undo), ("关注主题", case_follow), ("通知·有截止时间", case_trigger_deadline),
-    ("通知·工作群被 @", case_trigger_mention), ("通知·后台动作变按钮", case_trigger_button), ("通知·拟好回复一键发出", case_reply),
+    ("通知·工作群被 @", case_trigger_mention), ("通知·后台动作变按钮", case_trigger_button), ("反馈·别再提这类", case_feedback_rule),
+    ("通知·拟好回复一键发出", case_reply), ("通知·你已经点开了", case_already_opened),
     ("定时任务到点执行", case_scheduled_task),
 ]
 

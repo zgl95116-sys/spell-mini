@@ -51,8 +51,8 @@ class ProfileAgent(
     suspend fun run(trigger: String): String = lock.withLock {
         running.value = true
         try {
-            // Followed topics are the user's own instructions to the feed, not facts to be rewritten or pruned.
-            val entries = db.memory().list().filter { it.source != MemorySource.FOLLOW }
+            // Followed topics and rules are the user's own instructions, not facts to be rewritten or pruned.
+            val entries = db.memory().list().filter { it.source != MemorySource.FOLLOW && it.source != MemorySource.RULE }
             val events = db.events().recentJudged(80)
             val userLines = db.messages().lastN(60).filter { it.role == MsgRole.USER && it.kind == MsgKind.TEXT }.takeLast(30)
             val prompt = """

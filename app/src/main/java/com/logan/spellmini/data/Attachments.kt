@@ -31,8 +31,16 @@ object ChipState {
  * What hangs under a text message. Stored as JSON in [ChatMsg.cardJson], which a text row never used before, so old
  * databases keep working without a schema change.
  */
-data class Attachments(val links: List<LinkPreview> = emptyList(), val actions: List<ActionChip> = emptyList()) {
-    val isEmpty: Boolean get() = links.isEmpty() && actions.isEmpty()
+data class Attachments(
+    val links: List<LinkPreview> = emptyList(),
+    val actions: List<ActionChip> = emptyList(),
+    /** "up" or "down": what the user thought of a proactive message. */
+    val feedback: String? = null,
+    /** A [Handled] value once the user dealt with the notification behind a proactive message, and when. */
+    val handled: String? = null,
+    val handledAt: Long? = null,
+) {
+    val isEmpty: Boolean get() = links.isEmpty() && actions.isEmpty() && feedback == null && handled == null
 
     fun toJson(): String = buildJsonObject {
         putJsonArray("links") {
@@ -46,6 +54,9 @@ data class Attachments(val links: List<LinkPreview> = emptyList(), val actions: 
         putJsonArray("actions") {
             actions.forEach { chip -> addJsonObject { put("tool", chip.tool); put("args", chip.args); put("label", chip.label); put("state", chip.state) } }
         }
+        feedback?.let { put("feedback", it) }
+        handled?.let { put("handled", it) }
+        handledAt?.let { put("handledAt", it) }
     }.toString()
 
     companion object {
@@ -60,7 +71,7 @@ data class Attachments(val links: List<LinkPreview> = emptyList(), val actions: 
         fun parse(json: String?): Attachments? {
             if (json.isNullOrBlank()) return null
             val root = runCatching { Json.parseToJsonElement(json) as? JsonObject }.getOrNull() ?: return null
-            if (root["links"] == null && root["actions"] == null) return null
+            if (listOf("links", "actions", "feedback", "handled").none { it in root }) return null
             val links = root.arr("links").orEmpty().mapNotNull { it as? JsonObject }.mapNotNull { item ->
                 val url = item.str("url") ?: return@mapNotNull null
                 LinkPreview(item.str("title").orEmpty(), url, item.str("image"), (item["video"] as? JsonPrimitive)?.booleanOrNull == true)
@@ -69,7 +80,7 @@ data class Attachments(val links: List<LinkPreview> = emptyList(), val actions: 
                 val tool = item.str("tool") ?: return@mapNotNull null
                 ActionChip(tool, item.obj("args") ?: JsonObject(emptyMap()), item.str("label") ?: tool, item.str("state") ?: ChipState.OPEN)
             }
-            return Attachments(links, actions)
+            return Attachments(links, actions, root.str("feedback"), root.str("handled"), root.str("handledAt")?.toLongOrNull())
         }
     }
 }

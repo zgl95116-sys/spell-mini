@@ -18,8 +18,22 @@ interface EventDao {
 
     @Query("SELECT * FROM events WHERE id = :id") suspend fun get(id: Long): NotifEvent?
 
-    @Query("SELECT * FROM events ORDER BY postedAt DESC, id DESC LIMIT :limit")
+    @Query("SELECT * FROM events WHERE status != 'SEEN' ORDER BY postedAt DESC, id DESC LIMIT :limit")
     fun recent(limit: Int): Flow<List<NotifEvent>>
+
+    /** The notification behind a key, as it last went through the pipeline. */
+    @Query("SELECT * FROM events WHERE sbnKey = :key AND status IN ('QUEUED', 'JUDGED', 'ERROR') ORDER BY postedAt DESC, id DESC LIMIT 1")
+    suspend fun latestByKey(key: String): NotifEvent?
+
+    /** The first thing the user did about a notification after it arrived, if anything; filterReason holds a [Handled] value. */
+    @Query("SELECT * FROM events WHERE sbnKey = :key AND status = 'SEEN' AND postedAt >= :since ORDER BY postedAt ASC, id ASC LIMIT 1")
+    suspend fun handledSince(key: String, since: Long): NotifEvent?
+
+    @Query("SELECT * FROM events WHERE status = 'SEEN' AND postedAt >= :since")
+    suspend fun seenSince(since: Long): List<NotifEvent>
+
+    @Query("SELECT * FROM events WHERE outcome = :outcome AND postedAt >= :since ORDER BY postedAt DESC LIMIT :limit")
+    suspend fun withOutcomeSince(outcome: String, since: Long, limit: Int): List<NotifEvent>
 
     @Query("SELECT * FROM events WHERE status = 'JUDGED' ORDER BY postedAt DESC LIMIT :limit")
     suspend fun recentJudged(limit: Int): List<NotifEvent>
@@ -58,7 +72,7 @@ interface EventDao {
 
     @Query("SELECT * FROM events ORDER BY id ASC") suspend fun all(): List<NotifEvent>
 
-    @Query("SELECT COUNT(*) FROM events") fun total(): Flow<Int>
+    @Query("SELECT COUNT(*) FROM events WHERE status != 'SEEN'") fun total(): Flow<Int>
 
     @Query("SELECT * FROM events WHERE status = 'QUEUED'") suspend fun queued(): List<NotifEvent>
 
@@ -89,6 +103,10 @@ interface MessageDao {
 
     @Query("UPDATE messages SET cardJson = :json WHERE id = :id")
     suspend fun setAttachments(id: Long, json: String)
+
+    /** Messages the assistant sent on its own about a notification. */
+    @Query("SELECT * FROM messages WHERE eventId IS NOT NULL AND sourceLabel IS NOT NULL AND kind = 'text' AND createdAt >= :since")
+    suspend fun proactiveSince(since: Long): List<ChatMsg>
 
     @Query("UPDATE messages SET text = :text, streaming = :streaming WHERE id = :id")
     suspend fun setText(id: Long, text: String, streaming: Boolean)

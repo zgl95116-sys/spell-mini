@@ -30,6 +30,7 @@ internal object ChatTools {
     const val UNFOLLOW = "unfollow_topic"
     const val REFRESH_FEED = "refresh_feed"
     const val DRAFT_REPLY = "draft_reply"
+    const val UNHANDLED = "list_unhandled"
 
     private class Param(val type: String, val description: String, val options: List<String>? = null)
 
@@ -107,6 +108,11 @@ internal object ChatTools {
         },
     )
 
+    private val unhandled = tool(
+        UNHANDLED, "列出最近一天里你主动提过、而用户还没点开、没在 App 里看过、也没回复的通知。他问「还有什么没处理」「谁找我还没回」时用。",
+        emptyList(), emptyMap(),
+    )
+
     private val calendar = tool(
         Actions.CALENDAR, "打开日历的新建日程页并填好内容，用户点保存即可。", listOf("title", "start_iso"),
         mapOf(
@@ -180,7 +186,7 @@ internal object ChatTools {
         add(search); add(remember); add(reminder(mode)); add(schedule)
         when (mode) {
             TurnMode.USER -> {
-                add(draftReply(mode))
+                add(draftReply(mode)); add(unhandled)
                 feedControl.forEach { add(it) }
                 listOf(calendar, alarm, timer, openApp, openLink, dial, compose, map, settings, share, copy, contact, music, camera).forEach { add(it) }
             }

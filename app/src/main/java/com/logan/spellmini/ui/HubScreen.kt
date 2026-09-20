@@ -32,6 +32,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -51,6 +52,7 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
 import com.logan.spellmini.Graph
 import com.logan.spellmini.data.EventStatus
+import com.logan.spellmini.data.Handled
 import com.logan.spellmini.data.NotifEvent
 import com.logan.spellmini.data.Outcome
 import com.logan.spellmini.data.Route
@@ -167,7 +169,30 @@ private fun TodaySummary(events: List<NotifEvent>) {
             "主动开口 $spoke · 选择沉默 $silent · Feed 卡 $cards · JEV 中位耗时 ${median?.let { "$it ms" } ?: "—"} · 花费 ${formatUsd(cost)}",
             color = Ink.Muted, fontSize = 12.sp,
         )
+        QualityLine(events.size)
     }
+}
+
+/**
+ * How the proactive messages of the last seven days were received. The denominators are small on purpose: this is a
+ * sanity check while using the app; the export carries the same labels for a proper evaluation.
+ */
+@Composable
+private fun QualityLine(refreshKey: Int) {
+    var line by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(refreshKey) {
+        line = withContext(Dispatchers.IO) {
+            val since = System.currentTimeMillis() - 7 * 24 * 3_600_000L
+            val sent = Graph.db.messages().proactiveSince(since).map { com.logan.spellmini.data.Attachments.parse(it.cardJson) }
+            if (sent.isEmpty()) return@withContext null
+            val up = sent.count { it?.feedback == "up" }
+            val down = sent.count { it?.feedback == "down" }
+            val actedAfter = sent.count { Handled.knowsContent(it?.handled) }
+            val spared = Graph.db.events().withOutcomeSince(Outcome.CHAT_SILENT, since, 500).count { it.outcomeNote.orEmpty().contains("不再重复") || it.outcomeNote.orEmpty().contains("没有发出") }
+            "近 7 天主动消息 ${sent.size} 条：有用 $up · 别再提 $down · 之后你去处理了原通知 $actedAfter · 你已先处理所以没发 $spared"
+        }
+    }
+    line?.let { Text(it, color = Ink.Muted, fontSize = 12.sp, modifier = Modifier.padding(top = 2.dp)) }
 }
 
 @Composable
@@ -211,6 +236,8 @@ private fun outcomeLine(event: NotifEvent): String? = when {
 @Composable
 private fun EventDetail(event: NotifEvent, onDismiss: () -> Unit) {
     val context = LocalContext.current
+    var handled by remember(event.id) { mutableStateOf<NotifEvent?>(null) }
+    LaunchedEffect(event.id) { handled = withContext(Dispatchers.IO) { Graph.db.events().handledSince(event.sbnKey, event.postedAt) } }
     val probabilities = remember(event.routeProbs) {
         runCatching { Json.parseToJsonElement(event.routeProbs ?: "{}") as JsonObject }.getOrNull()
             ?.mapValues { it.value.jsonPrimitive.doubleOrNull ?: 0.0 }.orEmpty()
@@ -224,6 +251,14 @@ private fun EventDetail(event: NotifEvent, onDismiss: () -> Unit) {
                 TextButton(onClick = { copy(context, eventJson(event).toString()) }) { Text("复制 JSON") }
                 if (event.status == EventStatus.JUDGED || event.status == EventStatus.ERROR) {
                     TextButton(onClick = { Graph.pipeline.rejudge(event.id); onDismiss() }) { Text("重判") }
+                    // A miss can only be pointed out here: nothing was said, so there is nothing in the chat to put a thumb on.
+                    if (event.outcome != Outcome.CHAT_SENT) {
+                        TextButton(onClick = {
+                            Graph.chat.shouldHaveTold(event)
+                            Toast.makeText(context, "记下了，会写成一条规则，Chat 里能看到、能撤销", Toast.LENGTH_SHORT).show()
+                            onDismiss()
+                        }) { Text("该提醒我") }
+                    }
                 }
             }
         },
@@ -254,6 +289,10 @@ private fun EventDetail(event: NotifEvent, onDismiss: () -> Unit) {
                 ).forEach { Text(it, color = Ink.Muted, fontSize = 12.sp, fontFamily = FontFamily.Monospace) }
                 event.secondJudgeNote?.let { Text("二判：$it → ${event.finalRoute}", color = Ink.Amber, fontSize = 13.sp) }
                 outcomeLine(event)?.let { Text(it, color = Ink.Body, fontSize = 13.sp) }
+                handled?.let {
+                    val minutes = ((it.postedAt - event.postedAt) / 60_000).coerceAtLeast(0)
+                    Text("${Handled.label(it.filterReason)}（${if (minutes < 1) "不到 1 分钟后" else "$minutes 分钟后"}）", color = Ink.Green, fontSize = 13.sp)
+                }
             }
         },
     )
@@ -275,6 +314,8 @@ private fun ProbabilityBar(name: String, probability: Double) {
 
 private fun eventJson(event: NotifEvent): JsonObject = buildJsonObject {
     put("id", event.id)
+    // Joins a SEEN row (what the user did about a notification, in filter_reason) to the notification itself.
+    put("key", event.sbnKey)
     put("posted_at", event.postedAt)
     put("app", event.appName)
     put("package", event.pkg)

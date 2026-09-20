@@ -74,6 +74,7 @@ import com.logan.spellmini.data.Attachments
 import com.logan.spellmini.data.CardState
 import com.logan.spellmini.data.ChatMsg
 import com.logan.spellmini.data.ChipState
+import com.logan.spellmini.data.Handled
 import com.logan.spellmini.data.LinkPreview
 import com.logan.spellmini.net.obj
 import com.logan.spellmini.net.str
@@ -157,6 +158,28 @@ private fun MessageRow(message: ChatMsg, liveText: String?) {
                 }
                 if (!attachments?.links.isNullOrEmpty()) LinkRow(attachments!!.links)
                 if (fromNotification || !attachments?.actions.isNullOrEmpty()) ChipColumn(message, attachments?.actions.orEmpty(), fromNotification)
+                if (fromNotification) FeedbackRow(message, attachments)
+            }
+        }
+    }
+}
+
+/**
+ * Two words under every proactive message. "别再提这类" becomes a rule he can read and take back; both are kept as
+ * labels, together with what he did about the notification on his own, which is shown here once it is known.
+ */
+@Composable
+private fun FeedbackRow(message: ChatMsg, attachments: Attachments?) {
+    val handled = attachments?.handled
+    val feedback = attachments?.feedback
+    Row(Modifier.padding(start = 6.dp, top = 5.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+        if (handled != null) Text("✓ ${Handled.label(handled)}", color = Ink.Green, fontSize = 11.sp)
+        when (feedback) {
+            "up" -> Text("已标：有用", color = Ink.Muted, fontSize = 11.sp)
+            "down" -> Text("已标：别再提这类", color = Ink.Muted, fontSize = 11.sp)
+            else -> {
+                Text("有用", color = Ink.Muted, fontSize = 11.sp, modifier = Modifier.clickable { Graph.chat.feedback(message, useful = true) })
+                Text("别再提这类", color = Ink.Muted, fontSize = 11.sp, modifier = Modifier.clickable { Graph.chat.feedback(message, useful = false) })
             }
         }
     }
@@ -169,7 +192,8 @@ private fun ActionNote(message: ChatMsg) {
     val tool = payload?.str("tool")
     val due = remember(payload) { tool?.let { name -> payload?.obj("args")?.let { Actions.dueAt(name, it) } } }
     val undone = message.cardState == CardState.UNDONE
-    val canUndo = !undone && tool in Actions.undoable && (due ?: 0) > System.currentTimeMillis()
+    // A timed item can be taken back until it fires; a rule learnt from feedback, at any time.
+    val canUndo = !undone && ((tool in Actions.undoable && (due ?: 0) > System.currentTimeMillis()) || tool == ChatAgent.RULE_NOTE)
     Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
         Text(
             if (undone) "已撤销 · ${message.text}" else "✓ ${message.text}", color = Ink.Muted, fontSize = 12.sp, maxLines = 2,

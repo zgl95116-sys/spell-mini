@@ -8,6 +8,7 @@ import com.logan.spellmini.data.AppDb
 import com.logan.spellmini.data.AppRule
 import com.logan.spellmini.data.Criteria
 import com.logan.spellmini.data.EventStatus
+import com.logan.spellmini.data.Handled
 import com.logan.spellmini.data.NotifEvent
 import com.logan.spellmini.data.Outcome
 import com.logan.spellmini.data.Route
@@ -64,6 +65,9 @@ class Pipeline(
     var onSecondJudge: (suspend (NotifEvent) -> Pair<String, String>)? = null
     var afterJudged: (suspend () -> Unit)? = null
 
+    /** The user dealt with a notification himself; the chat agent marks its message and withdraws our own notification. */
+    var onHandled: (suspend (NotifEvent, String) -> Unit)? = null
+
     /**
      * Lines seen so far for one notification key. Chat apps resend the previous turns with every update, so merging
      * whole snapshots would repeat them; de-duplicating by line keeps each message once, in order.
@@ -86,6 +90,34 @@ class Pipeline(
         scope.launch {
             runCatching { ingestLocked(raw, contentIntent, replyAction) }.onFailure { Log.e(TAG, "ingest failed", it) }
         }
+    }
+
+    /** Called by the listener when a notification leaves the shade because of something the user did. */
+    fun onRemoved(key: String, how: String, postedAgain: () -> Boolean) {
+        scope.launch {
+            runCatching {
+                if (how == Handled.READ_IN_APP) {
+                    delay(REPOST_GRACE_MS)
+                    if (postedAgain()) return@launch
+                }
+                recordHandled(key, how)
+            }.onFailure { Log.w(TAG, "could not record removal", it) }
+        }
+    }
+
+    /** One row per notification: the first thing he did is the one that says how quickly he got to it. */
+    private suspend fun recordHandled(key: String, how: String) {
+        val event = db.events().latestByKey(key) ?: return
+        val earlier = db.events().handledSince(key, event.postedAt)
+        // A reply outranks whatever came first: "opened" says he saw it, "replied" says the matter is closed.
+        if (earlier != null && !(how == Handled.REPLIED && earlier.filterReason != Handled.REPLIED)) return
+        db.events().insert(
+            NotifEvent(
+                sbnKey = key, pkg = event.pkg, appName = event.appName, title = event.title, text = "",
+                postedAt = System.currentTimeMillis(), status = EventStatus.SEEN, filterReason = how,
+            )
+        )
+        runCatching { onHandled?.invoke(event, how) }
     }
 
     /** The newest copy of a notification holds the handles that still work, so they replace the earlier ones. */
@@ -214,7 +246,10 @@ class Pipeline(
      */
     private suspend fun repost(raw: RawNotification): String? {
         val newestAt = raw.latestMessageAt ?: return null
-        if (raw.latestFromUser) return "最新一条是你自己发的"
+        if (raw.latestFromUser) {
+            recordHandled(raw.key, Handled.REPLIED)
+            return "最新一条是你自己发的"
+        }
         // Exact while the process lives: the same newest message again means nothing new.
         val seen = newestSeen[raw.key]
         if (newestSeen.size > 500) newestSeen.clear()
@@ -374,6 +409,7 @@ class Pipeline(
         private const val CLOCK_PATTERN = "yyyy-MM-dd HH:mm EEEE"
         private const val CLOSE_CALL = 0.40
         private const val RESTART_MARGIN_MS = 60_000L
+        private const val REPOST_GRACE_MS = 3_000L
         private const val REPOSTED = "没有新消息，只是被 App 重新贴出"
         private val SYSTEM_NOISE = setOf("android", "com.android.systemui")
         // "call" is the ringing or ongoing call itself: by the time a model has looked at it, it is over. Missed calls

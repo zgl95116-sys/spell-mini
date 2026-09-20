@@ -12,6 +12,32 @@ object EventStatus {
     const val JUDGED = "JUDGED"
     const val ERROR = "ERROR"
     const val INTEREST = "INTEREST"   // not a notification: one topic of a profile-driven feed run, logged for the trace
+    const val SEEN = "SEEN"           // not a notification either: the user dealt with one (see [Handled]); filterReason says how
+}
+
+/**
+ * How the user dealt with a notification on his own. Recorded as its own row (status SEEN, same sbnKey) so nothing in
+ * the schema changes. It is what lets the assistant stay quiet about things he has already seen, and it is the cheapest
+ * relevance label there is: what he opened although it was judged "ignore", what he swiped away although it was raised.
+ */
+object Handled {
+    const val OPENED = "opened"           // tapped the notification
+    const val DISMISSED = "dismissed"     // swiped it away
+    const val READ_IN_APP = "read_in_app" // the app withdrew it, which chat apps do once the conversation was read
+    const val REPLIED = "replied"         // the conversation came back with his own message on top
+
+    /** He has seen the content itself, not just the banner. */
+    fun knowsContent(how: String?) = how == OPENED || how == READ_IN_APP || how == REPLIED
+
+    fun label(how: String?) = when (how) {
+        OPENED -> "你点开了原通知"
+        DISMISSED -> "你划掉了原通知"
+        // The app took its notification back. Chat apps do that once the conversation was read, here or on another
+        // device, but it is an inference, and the wording says so.
+        READ_IN_APP -> "原通知被 App 收回了，多半是你已经看过"
+        REPLIED -> "你已经回复了"
+        else -> ""
+    }
 }
 
 object Route {
@@ -96,6 +122,9 @@ object MemorySource {
 
     /** A topic the user asked the feed to keep following. Not a fact about the user, so the profile agent leaves it alone. */
     const val FOLLOW = "关注"
+
+    /** What to bring up or leave out, distilled from his thumbs on proactive messages and from "should have told me". */
+    const val RULE = "规则"
 }
 
 @Entity(tableName = "messages", indices = [Index("createdAt")])

@@ -25,7 +25,8 @@ object Notifier {
     private const val NORMAL = "proactive_normal_v2"
     private val RETIRED = listOf("proactive_loud", "proactive_quiet")
 
-    fun proactive(context: Context, title: String, text: String, alert: Boolean): Delivery {
+    /** [id] ties the notification to what it is about, so [cancel] can take it back once the user has dealt with that. */
+    fun proactive(context: Context, title: String, text: String, alert: Boolean, id: Int = (System.currentTimeMillis() % Int.MAX_VALUE).toInt()): Delivery {
         if (!NotificationManagerCompat.from(context).areNotificationsEnabled()) return Delivery.BLOCKED
         val manager = context.getSystemService(NotificationManager::class.java)
         RETIRED.forEach(manager::deleteNotificationChannel)
@@ -47,7 +48,12 @@ object Notifier {
             .setAutoCancel(true)
             .setContentIntent(open)
             .build()
-        manager.notify((System.currentTimeMillis() % Int.MAX_VALUE).toInt(), notification)
+        manager.notify(id, notification)
         return if (alert) Delivery.ALERT else Delivery.NORMAL
     }
+
+    fun cancel(context: Context, id: Int) = context.getSystemService(NotificationManager::class.java).cancel(id)
+
+    /** Notification id for a proactive message about one event. Offset so it cannot collide with the keep-alive id. */
+    fun idFor(eventId: Long): Int = 10_000 + (eventId % 1_000_000).toInt()
 }

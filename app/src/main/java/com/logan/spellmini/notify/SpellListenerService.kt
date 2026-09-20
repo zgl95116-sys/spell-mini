@@ -7,6 +7,7 @@ import android.service.notification.StatusBarNotification
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.logan.spellmini.Graph
+import com.logan.spellmini.data.Handled
 
 /** Plain snapshot of a posted notification, detached from framework objects. */
 data class RawNotification(
@@ -46,6 +47,19 @@ class SpellListenerService : NotificationListenerService() {
     }
 
     override fun onNotificationPosted(sbn: StatusBarNotification) = handle(sbn)
+
+    override fun onNotificationRemoved(sbn: StatusBarNotification, rankingMap: RankingMap, reason: Int) {
+        if (sbn.packageName == packageName || (sbn.notification.flags and Notification.FLAG_GROUP_SUMMARY) != 0) return
+        val how = when (reason) {
+            REASON_CLICK -> Handled.OPENED
+            REASON_CANCEL, REASON_CANCEL_ALL -> Handled.DISMISSED
+            REASON_APP_CANCEL, REASON_APP_CANCEL_ALL -> Handled.READ_IN_APP
+            else -> return // timeouts, channel bans, package changes: nothing the user did
+        }
+        val key = sbn.key
+        // Apps also withdraw a notification just to post it again (a rebuilt message group); that is not reading.
+        Graph.pipeline.onRemoved(key, how) { runCatching { activeNotifications.any { it.key == key } }.getOrDefault(false) }
+    }
 
     private fun handle(sbn: StatusBarNotification) {
         // Never react to our own notifications, otherwise proactive messages would trigger themselves.

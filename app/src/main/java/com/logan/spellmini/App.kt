@@ -66,6 +66,7 @@ object Graph {
             onFeed = feed::generate
             onSecondJudge = chat::secondJudge
             afterJudged = profile::maybeAutoRun
+            onHandled = chat::markHandled
         }
         pipeline.recoverOnStart()
         // Profile-driven feed. A plain loop is enough: the notification listener keeps this process alive, and a
@@ -121,12 +122,15 @@ object Graph {
     suspend fun profileText(): String {
         val mine = maskSecrets(settings.userProfile.trim()).take(OWN_BUDGET)
         val entries = db.memory().list()
-        val learned = entries.filter { it.source != MemorySource.FOLLOW }.joinToString("\n") { "- " + it.text }.take(LEARNED_BUDGET)
+        val learned = entries.filter { it.source != MemorySource.FOLLOW && it.source != MemorySource.RULE }.joinToString("\n") { "- " + it.text }.take(LEARNED_BUDGET)
         val follows = entries.filter { it.source == MemorySource.FOLLOW }.joinToString("\n") { "- " + it.text }
+        // His own verdicts on what was worth raising. They reach JEV, the second judge and the chat model alike.
+        val rules = entries.filter { it.source == MemorySource.RULE }.joinToString("\n") { "- " + it.text }.take(RULES_BUDGET)
         return listOf(
             mine.takeIf { it.isNotBlank() }?.let { "[written by the user]\n$it" },
             learned.takeIf { it.isNotBlank() }?.let { "[learned by the assistant]\n${maskSecrets(it)}" },
             follows.takeIf { it.isNotBlank() }?.let { "[topics the user asked to keep following]\n$it" },
+            rules.takeIf { it.isNotBlank() }?.let { "[rules the user set about what to bring up (要主动告诉他) and what to leave out (不要主动提)]\n$it" },
         ).filterNotNull().joinToString("\n\n")
     }
 
@@ -142,6 +146,7 @@ object Graph {
     private val CARD_NUMBER = Regex("(?<!\\d)\\d{15,19}(?!\\d)")
     private const val OWN_BUDGET = 4_000
     private const val LEARNED_BUDGET = 1_500
+    private const val RULES_BUDGET = 1_000
     private const val STARTUP_GRACE_MS = 30_000L
     private const val SCHEDULER_TICK_MS = 5 * 60_000L
 }
