@@ -48,6 +48,12 @@ fun ExtendedSettings() {
             onMinus = { settings.feedPerDayCap -= 5 }, onPlus = { settings.feedPerDayCap += 5 })
 
         SectionTitle("兴趣巡查（不靠通知，按画像主动找内容）", Modifier.padding(top = 8.dp))
+        Stepper("后台每天最多花", "定期任务、盯着的事、交办的活加起来，没人看着的时候一天最多花这么多；到了就停，第二天再跑", "$" + "%.2f".format(settings.autoBudgetCents / 100.0),
+            { settings.autoBudgetCents = (settings.autoBudgetCents - 25).coerceAtLeast(25) }, { settings.autoBudgetCents = (settings.autoBudgetCents + 25).coerceAtMost(1000) })
+        Stepper("一件活最多花", "交办的调研活到这个数就停止查资料、直接交稿（一次搜索约 \$0.007，读网页不花钱）", "$" + "%.2f".format(settings.jobBudgetCents / 100.0),
+            { settings.jobBudgetCents = (settings.jobBudgetCents - 5).coerceAtLeast(5) }, { settings.jobBudgetCents = (settings.jobBudgetCents + 5).coerceAtMost(100) })
+        ToggleRow("留意该有下文的事", "从通知里记下「周五前回你」「预计 23 日送达」这类有时间的事，到点没下文就问你一句；有下文就悄悄结掉。每三小时最多看一次。", settings.loopsEnabled) { settings.loopsEnabled = it }
+        ToggleRow("把正在播放的当作兴趣信号", "只记播放器里的标题，只用来给 Feed 选题。", settings.mediaSignalEnabled) { settings.mediaSignalEnabled = it }
         ToggleRow("定时按兴趣生成 Feed", "0 点到 7 点不跑。每张卡约 \$0.01，每一次尝试都会记进通知流水。", settings.interestFeedEnabled) { settings.interestFeedEnabled = it }
         Stepper("多久一批", "到点后在后台跑；打开 Feed 时到点了也会跑", "${settings.interestIntervalMin} 分钟",
             onMinus = { settings.interestIntervalMin -= 15 }, onPlus = { settings.interestIntervalMin += 15 })

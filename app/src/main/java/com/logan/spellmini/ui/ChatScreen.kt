@@ -69,6 +69,7 @@ import coil.compose.AsyncImage
 import com.logan.spellmini.Graph
 import com.logan.spellmini.actions.Actions
 import com.logan.spellmini.agent.ChatAgent
+import com.logan.spellmini.agent.JobAgent
 import com.logan.spellmini.data.ActionChip
 import com.logan.spellmini.data.Attachments
 import com.logan.spellmini.data.CardState
@@ -77,6 +78,7 @@ import com.logan.spellmini.data.ChipState
 import com.logan.spellmini.data.Handled
 import com.logan.spellmini.data.LinkPreview
 import com.logan.spellmini.net.obj
+import com.logan.spellmini.share.ShareActivity
 import com.logan.spellmini.net.str
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
@@ -85,7 +87,7 @@ import com.logan.spellmini.data.MsgKind
 import com.logan.spellmini.data.MsgRole
 
 @Composable
-fun ChatScreen(pendingContext: String?, onContextConsumed: () -> Unit) {
+fun ChatScreen(pendingContext: String?, pendingImage: String? = null, onContextConsumed: () -> Unit) {
     val messages by Graph.db.messages().all().collectAsState(initial = emptyList())
     val activity by Graph.chat.activity.collectAsState()
     val streaming by Graph.chat.streaming.collectAsState()
@@ -98,8 +100,13 @@ fun ChatScreen(pendingContext: String?, onContextConsumed: () -> Unit) {
     }
 
     val rowCount = messages.size + if (activity != null) 1 else 0
+    // The first jump to the end is instant: animating past several hundred rows left the screen stranded mid-history
+    // when the app was opened from the share sheet. After that, new rows slide in.
+    var settled by remember { mutableStateOf(false) }
     LaunchedEffect(rowCount, streaming?.second?.length, messages.lastOrNull()?.cardJson) {
-        if (rowCount > 0) listState.animateScrollToItem(rowCount - 1)
+        if (rowCount == 0) return@LaunchedEffect
+        if (settled) listState.animateScrollToItem(rowCount - 1) else listState.scrollToItem(rowCount - 1)
+        settled = true
     }
 
     Column(Modifier.fillMaxSize()) {
@@ -118,9 +125,10 @@ fun ChatScreen(pendingContext: String?, onContextConsumed: () -> Unit) {
         }
         Composer(
             quoted = pendingContext,
+            image = pendingImage,
             onClearQuoted = onContextConsumed,
             onSend = { text ->
-                Graph.chat.send(text, pendingContext)
+                Graph.chat.send(text, pendingContext, pendingImage)
                 onContextConsumed()
             },
         )
@@ -144,6 +152,12 @@ private fun MessageRow(message: ChatMsg, liveText: String?) {
             // Proactive messages about a notification can always jump back to it.
             val fromNotification = !mine && message.eventId != null && message.sourceLabel != null
             Column(Modifier.fillMaxWidth(), horizontalAlignment = if (mine) Alignment.End else Alignment.Start) {
+                attachments?.image?.let { path ->
+                    AsyncImage(
+                        model = java.io.File(path), contentDescription = "分享的图片", contentScale = ContentScale.Crop,
+                        modifier = Modifier.padding(bottom = 4.dp).size(width = 150.dp, height = 200.dp).clip(RoundedCornerShape(16.dp)).background(Ink.Bubble),
+                    )
+                }
                 message.sourceLabel?.let { label ->
                     Text(
                         "起因 · $label", color = Ink.Muted, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
@@ -156,10 +170,28 @@ private fun MessageRow(message: ChatMsg, liveText: String?) {
                 ) {
                     Text(lightMarkdown(text), color = if (mine) Color.White else Ink.Black, fontSize = 15.sp, lineHeight = 22.sp)
                 }
+                attachments?.docId?.let { docId -> DocCard(attachments.docTitle.orEmpty()) { Graph.openDoc.value = docId } }
                 if (!attachments?.links.isNullOrEmpty()) LinkRow(attachments!!.links)
                 if (fromNotification || !attachments?.actions.isNullOrEmpty()) ChipColumn(message, attachments?.actions.orEmpty(), fromNotification)
                 if (fromNotification) FeedbackRow(message, attachments)
             }
+        }
+    }
+}
+
+/** The page a job handed in. It opens full screen; the bubble above only carries the two-line conclusion. */
+@Composable
+private fun DocCard(title: String, onOpen: () -> Unit) {
+    val shape = RoundedCornerShape(16.dp)
+    Row(
+        Modifier.padding(top = 6.dp).widthIn(max = 300.dp).clip(shape).border(1.dp, Ink.Faint, shape).clickable(onClick = onOpen)
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text("📄", fontSize = 22.sp)
+        Column(Modifier.padding(start = 10.dp).weight(1f, fill = false)) {
+            Text(title.ifBlank { "成品" }, color = Ink.Black, fontSize = 14.sp, fontWeight = FontWeight.Medium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            Text("打开成品 ↗", color = Ink.Blue, fontSize = 12.sp)
         }
     }
 }
@@ -192,16 +224,27 @@ private fun ActionNote(message: ChatMsg) {
     val tool = payload?.str("tool")
     val due = remember(payload) { tool?.let { name -> payload?.obj("args")?.let { Actions.dueAt(name, it) } } }
     val undone = message.cardState == CardState.UNDONE
-    // A timed item can be taken back until it fires; a rule learnt from feedback, at any time.
-    val canUndo = !undone && ((tool in Actions.undoable && (due ?: 0) > System.currentTimeMillis()) || tool == ChatAgent.RULE_NOTE)
+    // A timed item can be taken back until it fires; a rule learnt from feedback or a standing task, at any time.
+    val canUndo = message.cardState == CardState.DONE &&
+        ((tool in Actions.undoable && (due ?: 0) > System.currentTimeMillis()) || tool == ChatAgent.RULE_NOTE || tool == TASK_NOTE)
+    val running = tool == JobAgent.JOB_NOTE && message.cardState == JobAgent.RUNNING
     Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
+        val mark = when {
+            undone -> "已撤销 · "
+            running -> "⏳ "
+            message.cardState == CardState.FAILED -> "✕ "
+            else -> "✓ "
+        }
         Text(
-            if (undone) "已撤销 · ${message.text}" else "✓ ${message.text}", color = Ink.Muted, fontSize = 12.sp, maxLines = 2,
+            mark + message.text, color = Ink.Muted, fontSize = 12.sp, maxLines = 2,
             overflow = TextOverflow.Ellipsis, textDecoration = if (undone) TextDecoration.LineThrough else null,
             modifier = Modifier.weight(1f, fill = false),
         )
         if (canUndo) {
             Text("撤销", color = Ink.Blue, fontSize = 12.sp, fontWeight = FontWeight.Medium, modifier = Modifier.padding(start = 10.dp).clickable { Graph.chat.undo(message) })
+        }
+        if (running) {
+            Text("取消", color = Ink.Blue, fontSize = 12.sp, fontWeight = FontWeight.Medium, modifier = Modifier.padding(start = 10.dp).clickable { Graph.jobs.cancel(message.id) })
         }
     }
 }
@@ -250,6 +293,7 @@ private fun LinkCard(link: LinkPreview, onClick: () -> Unit) {
 }
 
 private const val MIN_LINK_IMAGE_PX = 200
+private const val TASK_NOTE = "task"
 
 /** One-tap actions under a message. The label comes from the exact arguments that will run, not from the model's prose. */
 @Composable
@@ -354,17 +398,29 @@ private fun ThinkingBubble(label: String) {
 }
 
 @Composable
-private fun Composer(quoted: String?, onClearQuoted: () -> Unit, onSend: (String) -> Unit) {
+private fun Composer(quoted: String?, image: String?, onClearQuoted: () -> Unit, onSend: (String) -> Unit) {
     var draft by rememberSaveable { mutableStateOf("") }
+    val fromShare = quoted?.startsWith(ShareActivity.PREFIX) == true
     Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp).padding(bottom = 14.dp, top = 6.dp)) {
+        if (fromShare) {
+            // What people most often want done with something they just shared; anything else they can type.
+            Row(Modifier.padding(bottom = 8.dp).horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                listOf("总结一下", "帮我拟个回复", "里面的时间地点存进日历", "记下来").forEach { ask -> ChipButton(ask) { onSend(ask) } }
+            }
+        }
         if (quoted != null) {
             Row(
                 Modifier.fillMaxWidth().padding(bottom = 8.dp).clip(RoundedCornerShape(14.dp)).background(Ink.Bubble)
                     .padding(horizontal = 12.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
+                if (image != null) {
+                    AsyncImage(model = java.io.File(image), contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.size(36.dp).clip(RoundedCornerShape(8.dp)))
+                    Spacer(Modifier.size(8.dp))
+                }
+                val preview = if (fromShare) quoted.removePrefix(ShareActivity.PREFIX).trim().lineSequence().firstOrNull().orEmpty().ifBlank { "一张图片" } else quoted.lineSequence().firstOrNull().orEmpty()
                 Text(
-                    "讨论：" + quoted.lineSequence().firstOrNull().orEmpty(), color = Ink.Body, fontSize = 13.sp,
+                    (if (fromShare) "分享来的：" else "讨论：") + preview, color = Ink.Body, fontSize = 13.sp,
                     maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f),
                 )
                 Icon(Icons.Filled.Close, contentDescription = "取消引用", tint = Ink.Muted, modifier = Modifier.size(16.dp).clickable(onClick = onClearQuoted))

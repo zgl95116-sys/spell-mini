@@ -162,6 +162,46 @@ class Settings(context: Context) {
         get() = prefs.getBoolean("greeted", false)
         set(value) = edit { putBoolean("greeted", value) }
 
+    /** Ceiling for what scheduled tasks, watches and jobs may spend in a day without anyone watching, in US cents. */
+    var autoBudgetCents: Int
+        get() = prefs.getInt("autoBudgetCents", 100)
+        set(value) = edit { putInt("autoBudgetCents", value) }
+
+    /** Ceiling for a single research job, in US cents. */
+    var jobBudgetCents: Int
+        get() = prefs.getInt("jobBudgetCents", 15)
+        set(value) = edit { putInt("jobBudgetCents", value) }
+
+    /** Notice things that should have a sequel (a promised reply, a delivery date) and check on them when they fall due. */
+    var loopsEnabled: Boolean
+        get() = prefs.getBoolean("loopsEnabled", true)
+        set(value) = edit { putBoolean("loopsEnabled", value) }
+
+    var lastLoopRunAt: Long
+        get() = prefs.getLong("lastLoopRunAt", 0)
+        set(value) = edit { putLong("lastLoopRunAt", value) }
+
+    var lastLoopEventId: Long
+        get() = prefs.getLong("lastLoopEventId", 0)
+        set(value) = edit { putLong("lastLoopEventId", value) }
+
+    /** Use what is playing (titles only) as an interest signal for the feed. */
+    var mediaSignalEnabled: Boolean
+        get() = prefs.getBoolean("mediaSignalEnabled", true)
+        set(value) = edit { putBoolean("mediaSignalEnabled", value) }
+
+    /** The last few things that played, newest first, one per line. */
+    val recentMedia: List<String> get() = prefs.getString("recentMedia", "").orEmpty().lines().filter { it.isNotBlank() }
+
+    fun rememberMedia(line: String) {
+        val next = (listOf(line.take(120)) + recentMedia.filter { it != line }).take(20)
+        prefs.edit().putString("recentMedia", next.joinToString("\n")).apply()
+    }
+
+    var lastTimezone: String
+        get() = prefs.getString("lastTimezone", "").orEmpty()
+        set(value) = edit { putString("lastTimezone", value) }
+
     /** One-time: notifications from other assistant apps were switched off by default (the user can switch them back on). */
     var assistantAppsQuieted: Boolean
         get() = prefs.getBoolean("assistantAppsQuieted", false)

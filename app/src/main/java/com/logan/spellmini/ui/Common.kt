@@ -36,6 +36,7 @@ fun NotifEvent.verdictLabel(): Pair<String, Color> = when {
     status == EventStatus.FILTERED -> "本地过滤" to Ink.Faint
     status == EventStatus.APP_OFF -> "App 已关" to Ink.Faint
     status == EventStatus.QUEUED -> "等待中" to Ink.Muted
+    status == EventStatus.TASK -> "在办" to Ink.Blue
     status == EventStatus.ERROR && finalRoute == null -> "出错" to Ink.Red
     else -> when (finalRoute ?: route) {
         Route.CHAT -> "chat" to Ink.Black

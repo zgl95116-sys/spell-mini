@@ -15,6 +15,11 @@ import kotlinx.coroutines.launch
  */
 class ReminderReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
+        val taskId = intent.getLongExtra(EXTRA_TASK_ID, 0)
+        if (taskId > 0) {
+            Graph.scope.launch { Graph.tasks.run(taskId) }
+            return
+        }
         val text = intent.getStringExtra(EXTRA_TEXT).orEmpty().ifBlank { return }
         val doIt = intent.getBooleanExtra(EXTRA_DO_IT, false)
         // The work can take a minute, far longer than a receiver may run. The process stays alive on its own (bound
@@ -32,5 +37,6 @@ class ReminderReceiver : BroadcastReceiver() {
     companion object {
         const val EXTRA_TEXT = "text"
         const val EXTRA_DO_IT = "do_it"
+        const val EXTRA_TASK_ID = "task_id"
     }
 }

@@ -66,6 +66,8 @@ def tap_text(prefix, attempts=3):
 
 
 def focus_app():
+    # A long run outlasts the screen timeout; a dark screen reads as "nothing on screen" and every tap misses.
+    adb("shell", "input", "keyevent", "KEYCODE_WAKEUP"); adb("shell", "wm", "dismiss-keyguard")
     adb("shell", "am", "start", "-n", f"{PKG}/.MainActivity"); time.sleep(2.5)
     chat = find(ui(), text="Chat")
     if chat: tap(*chat[0])
@@ -138,6 +140,7 @@ def ensure_default_launcher():
 
 
 ensure_default_launcher()
+adb("shell", "svc", "power", "stayon", "true")  # test device only: keep the screen on for the length of the run
 R = random.randint(10, 49)
 ALARM = f"设一个早上5点{R}分的闹钟，备注游泳{R}"
 FAKE = re.compile(r"\[确认卡|【确认卡|\[系统记录|【系统记录|\[我主动发的|\[NOCLAIM|\[SILENT|\[静默")
@@ -170,6 +173,9 @@ def record(name, ok, detail, rows):
     fake = bool(FAKE.search(text))
     ok = ok and not fake
     results.append(dict(case=name, ok=ok, detail=detail, fake_record_text=fake, said=text[:80]))
+    if not ok:  # what was on the screen when it failed says more than the database does
+        shot = adb("exec-out", "screencap", "-p", binary=True)
+        if shot: open(os.path.join(WORK, f"fail-{len(results)}.png"), "wb").write(shot)
     print(("PASS " if ok else "FAIL ") + f"{name:<14} {detail}  |  {text[:70]}", flush=True)
 
 
@@ -184,7 +190,9 @@ def run_user_case(name, typed, expect, tool, verify):
         ok = bool(done) and not cards and acted is not False and bool(text.strip())
         detail = f"记录={len(done)} 确认卡={len(cards)} 手机侧={'通过' if acted else ('无法核实' if acted is None else '未通过')}"
     elif expect == "explain":
-        ok = not done and not cards and bool(text.strip()) and not CLAIMS_DONE.search(text)
+        # "没装，我用浏览器开了网页版" is an honest answer too: a claim is fine when some tool really ran in this turn.
+        other = [r for r in rows if r["kind"] == "note" and r["cardState"] == "done" and payload(r).get("tool")]
+        ok = not done and not cards and bool(text.strip()) and (not CLAIMS_DONE.search(text) or bool(other))
         detail = "没执行、有解释、没有谎称已做" if ok else f"记录={len(done)} 有回复={bool(text.strip())} 谎称={bool(CLAIMS_DONE.search(text))}"
     elif expect == "repeat":
         ok = not done and not cards and bool(text.strip())
@@ -296,13 +304,19 @@ def case_trigger_mention():
     """Being @-ed at work deserves a heads-up, but never a "remind you to reply" reminder."""
     ev = db("select coalesce(max(id),0) m from events")[0]["m"]
     base = db("select coalesce(max(id),0) m from messages")[0]["m"]
-    title = f"增长项目群{R}"
-    # Varied per run: JEV sees recent notifications from the same app and rightly ignores a word-for-word repeat.
     who = random.choice(["李雷", "韩梅梅", "张伟", "王芳", "陈晨"])
-    doc = random.choice(["周报", "Q4 预算表", "评测报告", "上线排期表", "竞品分析", "访谈纪要", "埋点方案", "复盘 PPT", "需求文档", "数据看板"])
-    item = random.choice(["留存口径", "投放数字", "样本量", "灰度时间", "截图", "受访者信息", "渠道字段", "DAU 曲线", "验收标准", "转化漏斗"])
-    what = f"{doc}里的{item}和上周的版本对不上"
-    notify("飞书", title, f"{who}：@你 {what}，麻烦今天下班前看一下，明早要给老板过。")
+    # Work situations that differ in kind, not just in wording: after a day of near-identical "数据对不上" mentions the
+    # assistant rightly said "同类的事今天提过了" and kept quiet.
+    group, ask = random.choice([
+        ("发布评审群", "明天上线的回滚方案还差你确认，今天下班前回一下，不然发布要顺延"),
+        ("客户成功群", "A 客户下午三点临时要加一场演示，点名要你讲评测那部分，能不能来说一声"),
+        ("行政通知群", "你的工位下周一搬到 12 层，周五下班前把个人物品装箱贴好标签"),
+        ("招聘面试群", "周四下午两点的候选人面试官换成你了，简历我发你邮箱，麻烦确认时间"),
+        ("财务报销群", "你上个月的差旅报销单缺两张发票，本周三前不补就要退单重提"),
+        ("法务合规群", "新版数据合规承诺书需要本人签署，周五截止，链接在群公告里"),
+    ])
+    title = f"{group}{R}"
+    notify("飞书", title, f"{who}：@你 {ask}")
     event = wait_event(ev, title)
     rows = wait_quiet(base, need_reply=False, quiet=8)
     nag = [n for n in notes_for(rows, "set_reminder") if re.search("回复|回一下|回他", n["text"])]
@@ -404,10 +418,18 @@ def case_already_opened():
     adb("shell", "input", "keyevent", "KEYCODE_HOME"); time.sleep(1)
     ask = fresh_question()
     adb("emu", "sms", "send", f"135{random.randint(10000000, 99999999)}", ask)
-    time.sleep(2)
-    adb("shell", "cmd", "statusbar", "expand-notifications"); time.sleep(1.5)
-    spots = find(ui(), prefix=ask[:6])
-    if spots: tap(*spots[0])
+    # Open it from the shade and make sure the SMS app really came up: a tap on the drop-down banner sometimes only
+    # expands it, and then nothing was "opened" at all. (With dozens of unread test conversations the SMS app folds them
+    # into one group and the new line cannot be found; reset the SMS app's data on the test device when that happens.)
+    spots = []
+    for _ in range(3):
+        time.sleep(2)
+        adb("shell", "cmd", "statusbar", "expand-notifications"); time.sleep(1.5)
+        spots = find(ui(), prefix=ask[:6])
+        if not spots: continue
+        tap(*spots[0]); time.sleep(2)
+        if "messag" in top_activity(): break
+    opened = "messag" in top_activity()
     event, end = None, time.time() + 220
     while time.time() < end and not event:
         time.sleep(5)
@@ -419,8 +441,8 @@ def case_already_opened():
     marked = [payload(r).get("handled") for r in spoken]
     # Either it stayed quiet because he had already opened it, or the tap came after the message and the message got marked.
     quiet = bool(event) and not spoken and event["outcome"] in ("CHAT_SILENT", "NONE")
-    ok = bool(spots) and bool(seen) and (quiet or any(marked))
-    record("通知·你已经点开了", ok, f"点到通知={bool(spots)} 记录到={[s['filterReason'] for s in seen]} 结果={event and event['outcome']}（{((event or {}).get('outcomeNote') or '')[:24]}）消息上的标记={marked}", spoken)
+    ok = opened and bool(seen) and (quiet or any(marked))
+    record("通知·你已经点开了", ok, f"点开了短信 App={opened} 记录到={[s['filterReason'] for s in seen]} 结果={event and event['outcome']}（{((event or {}).get('outcomeNote') or '')[:24]}）消息上的标记={marked}", spoken)
 
 
 def case_feedback_rule():
@@ -450,11 +472,124 @@ def case_feedback_rule():
     record("反馈·别再提这类", bool(rule) and bool(note) and removed, f"点到={ok_tap} 规则={rule and rule['text']} 聊天里有记录={bool(note)} 撤销后规则已删={removed}", rows)
 
 
+def tasks_in_store():
+    rows = db("select id, text from memory where source='任务'")
+    out = []
+    for r in rows:
+        try: out.append(dict(json.loads(r["text"]), id=r["id"]))
+        except ValueError: pass
+    return out
+
+
+def case_lookup_only():
+    """A question is a question: looking something up must not dial, navigate or open anything on its own."""
+    base = db("select coalesce(max(id),0) m from messages")[0]["m"]
+    send("翻一下通知，最近谁给我发过带电话号码的短信？只告诉我就行")
+    rows = wait_quiet(base)
+    opened = [r for r in rows if r["kind"] == "note" and payload(r).get("tool") in ("dial_number", "show_on_map", "open_link", "open_app", "compose_message", "create_calendar_event")]
+    record("只问不做", bool(said(rows).strip()) and not opened, f"自作主张的动作={[payload(r).get('tool') for r in opened]}", rows)
+    adb("shell", "input", "keyevent", "KEYCODE_HOME")
+
+
+def case_recurring_task():
+    """A repeating task lands in 在办 with the right rule, and the note in the chat can take it back."""
+    before = {t["id"] for t in tasks_in_store()}
+    base = db("select coalesce(max(id),0) m from messages")[0]["m"]
+    send(f"每周五下午 5 点{R % 5 + 1}0 分给我整理一份本周 AI Agent 方向的进展")
+    rows = wait_quiet(base)
+    new = [t for t in tasks_in_store() if t["id"] not in before]
+    right = bool(new) and new[0]["kind"] == "recurring" and new[0]["repeat"] == "weekly" and new[0]["weekday"] == 5 and new[0]["at"].startswith("17:")
+    armed = "task_id" in adb("shell", "dumpsys", "alarm") or pending_reminders() > 0
+    undone = False
+    if new:
+        focus_app(); time.sleep(1)
+        spots = find(ui(), text="撤销")
+        if spots:
+            tap(*max(spots, key=lambda p: p[1])); time.sleep(2)
+            undone = new[0]["id"] not in {t["id"] for t in tasks_in_store()}
+    record("定期任务 + 撤销", right and undone, f"任务={[(t['title'], t['repeat'], t.get('weekday'), t['at']) for t in new]} 撤销后已删={undone}", rows)
+
+
+def case_watch_feed():
+    """A watch on a real feed: created with the feed attached, and a run reports what the feed really holds."""
+    before = {t["id"] for t in tasks_in_store()}
+    base = db("select coalesce(max(id),0) m from messages")[0]["m"]
+    repo = random.choice(["pytorch/pytorch", "vllm-project/vllm", "langchain-ai/langchain", "huggingface/transformers", "ollama/ollama"])
+    send(f"帮我盯着 GitHub 上 {repo} 的新版本，有了告诉我，每 3 小时看一次")
+    rows = wait_quiet(base)
+    new = [t for t in tasks_in_store() if t["id"] not in before]
+    has_feed = bool(new) and new[0]["kind"] == "watch" and "releases.atom" in new[0].get("feed", "")
+    ev = db("select coalesce(max(id),0) m from events")[0]["m"]
+    ran = None
+    if new:
+        send("把刚加的这个盯着的事现在跑一次")
+        end = time.time() + 150
+        while time.time() < end and not ran:
+            time.sleep(6)
+            got = db(f"select outcome, outcomeNote from events where id>{ev} and status='TASK' order by id desc limit 1")
+            ran = got[0] if got else None
+    record("盯着·订阅源", has_feed and bool(ran) and ran["outcome"] in ("CHAT_SENT", "CHAT_SILENT"), f"任务={[(t['title'], t.get('feed', '')[:50]) for t in new]} 跑一次={ran and ran['outcome']}（{((ran or {}).get('outcomeNote') or '')[:50]}）", db(ROWS.format(base)))
+    for t in new: send(f"把在办里的 #{t['id']} 删掉"); wait_quiet(db("select coalesce(max(id),0) m from messages")[0]["m"] - 1, timeout=60)
+
+
+def case_job():
+    """A piece of work comes back as a page: Markdown with sections and sources, stored as a card, handed over in the chat."""
+    base = db("select coalesce(max(id),0) m from messages")[0]["m"]
+    ev = db("select coalesce(max(id),0) m from events")[0]["m"]
+    topic = random.choice(["北京周边适合带老人的两天一夜温泉行程", "三款两千元以内的降噪耳机对比，通勤地铁用", "给新手的手冲咖啡入门装备清单，预算一千五", "国庆去青岛三天两晚的行程，不想太赶"])
+    send(f"帮我做一份：{topic}")
+    end, done = time.time() + 420, None
+    while time.time() < end and not done:
+        time.sleep(10)
+        got = db(f"select outcome, outcomeNote, outcomeRefId, downstreamCostUsd from events where id>{ev} and status='TASK' and title like '成品%' order by id desc limit 1")
+        done = got[0] if got else None
+    rows = db(ROWS.format(base))
+    doc = db(f"select title, length(body) n, body, sourcesJson from feed where id={done['outcomeRefId']}")[0] if done and done["outcomeRefId"] else None
+    handed = [r for r in rows if payload(r).get("docId")]
+    good = bool(doc) and doc["n"] > 600 and "#" in doc["body"] and len(json.loads(doc["sourcesJson"])) >= 2
+    record("交办一件活·成品", bool(done) and done["outcome"] == "CHAT_SENT" and good and bool(handed), f"成品={doc and doc['title']} 字数={doc and doc['n']} 来源={doc and len(json.loads(doc['sourcesJson']))} 花费=${(done or {}).get('downstreamCostUsd') or 0:.3f}（{((done or {}).get('outcomeNote') or '')[-24:]}）", rows)
+
+
+def case_share_text():
+    """Text shared from another app arrives next to the composer, and a quick ask gets an answer about it."""
+    base = db("select coalesce(max(id),0) m from messages")[0]["m"]
+    adb("shell", "input", "keyevent", "KEYCODE_HOME"); time.sleep(1)
+    note = f"周{random.choice('一二三四五')}下午三点在{random.choice(['望京 SOHO', '中关村软件园', '国贸三期'])}和{random.choice(['李总', '王经理', '陈老师'])}过方案，带上打印好的评测报告两份，提前十分钟到"
+    adb("shell", f"am start -a android.intent.action.SEND -t text/plain --es android.intent.extra.TEXT '{note}' -n {PKG}/.share.ShareActivity")
+    time.sleep(4)
+    shown = bool(find(ui(), prefix="分享来的"))
+    spots = find(ui(), text="总结一下")
+    if spots: tap(*spots[0])
+    rows = wait_quiet(base, timeout=120)
+    record("分享进来的文字", shown and bool(spots) and bool(said(rows).strip()), f"出现分享条={shown} 点到快捷问法={bool(spots)}", rows)
+    adb("shell", "input", "keyevent", "KEYCODE_HOME")
+
+
+def case_open_loop():
+    """A promise with a time in a notification becomes something the assistant waits on."""
+    before = {t["id"] for t in tasks_in_store()}
+    who = random.choice(["供应商老陈", "装修队刘工", "律所张律师", "猎头 Amy", "房东孙阿姨"])
+    thing = random.choice(["报价单", "施工排期", "合同修改稿", "候选人名单", "续租合同"])
+    day = random.choice(["周三上午十点前", "周四下班前", "后天中午前", "周五下午三点前"])
+    title = f"{who}{R}"
+    notify("微信", title, f"不好意思久等，{thing}我这边还在核，{day}一定发您邮箱。")
+    wait_event(db("select coalesce(max(id),0) m from events")[0]["m"] - 1, title, timeout=120)
+    time.sleep(3)
+    broadcast("DEBUG_LOOPS")
+    new, end = [], time.time() + 90
+    while time.time() < end and not new:
+        time.sleep(6)
+        new = [t for t in tasks_in_store() if t["id"] not in before and t["kind"] == "loop"]
+    mine = [t for t in new if thing[:2] in t["title"] + t["instruction"] or who[:3] in t["title"] + t["instruction"] + t.get("about", "")]
+    record("该来没来·记下等下文的事", bool(mine) and mine[0]["nextAt"] > time.time() * 1000, f"记下={[(t['title'], t['instruction'][:30]) for t in new]}", [])
+
+
 SPECIAL = [
     ("提醒 + 撤销", case_reminder_and_undo), ("关注主题", case_follow), ("通知·有截止时间", case_trigger_deadline),
     ("通知·工作群被 @", case_trigger_mention), ("通知·后台动作变按钮", case_trigger_button), ("反馈·别再提这类", case_feedback_rule),
     ("通知·拟好回复一键发出", case_reply), ("通知·你已经点开了", case_already_opened),
-    ("定时任务到点执行", case_scheduled_task),
+    ("只问不做", case_lookup_only), ("定期任务 + 撤销", case_recurring_task), ("盯着·订阅源", case_watch_feed), ("分享进来的文字", case_share_text),
+    ("该来没来·记下等下文的事", case_open_loop), ("交办一件活·成品", case_job), ("定时任务到点执行", case_scheduled_task),
 ]
 
 wanted = sys.argv[1:]

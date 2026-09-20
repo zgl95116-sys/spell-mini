@@ -39,8 +39,13 @@ data class Attachments(
     /** A [Handled] value once the user dealt with the notification behind a proactive message, and when. */
     val handled: String? = null,
     val handledAt: Long? = null,
+    /** A finished piece of work (a feed card holding Markdown) that this message hands over. */
+    val docId: Long? = null,
+    val docTitle: String? = null,
+    /** Path of a picture the user shared with this message. */
+    val image: String? = null,
 ) {
-    val isEmpty: Boolean get() = links.isEmpty() && actions.isEmpty() && feedback == null && handled == null
+    val isEmpty: Boolean get() = links.isEmpty() && actions.isEmpty() && feedback == null && handled == null && docId == null && image == null
 
     fun toJson(): String = buildJsonObject {
         putJsonArray("links") {
@@ -57,6 +62,9 @@ data class Attachments(
         feedback?.let { put("feedback", it) }
         handled?.let { put("handled", it) }
         handledAt?.let { put("handledAt", it) }
+        docId?.let { put("docId", it) }
+        docTitle?.let { put("docTitle", it) }
+        image?.let { put("image", it) }
     }.toString()
 
     companion object {
@@ -71,7 +79,7 @@ data class Attachments(
         fun parse(json: String?): Attachments? {
             if (json.isNullOrBlank()) return null
             val root = runCatching { Json.parseToJsonElement(json) as? JsonObject }.getOrNull() ?: return null
-            if (listOf("links", "actions", "feedback", "handled").none { it in root }) return null
+            if (listOf("links", "actions", "feedback", "handled", "docId", "image").none { it in root }) return null
             val links = root.arr("links").orEmpty().mapNotNull { it as? JsonObject }.mapNotNull { item ->
                 val url = item.str("url") ?: return@mapNotNull null
                 LinkPreview(item.str("title").orEmpty(), url, item.str("image"), (item["video"] as? JsonPrimitive)?.booleanOrNull == true)
@@ -80,7 +88,7 @@ data class Attachments(
                 val tool = item.str("tool") ?: return@mapNotNull null
                 ActionChip(tool, item.obj("args") ?: JsonObject(emptyMap()), item.str("label") ?: tool, item.str("state") ?: ChipState.OPEN)
             }
-            return Attachments(links, actions, root.str("feedback"), root.str("handled"), root.str("handledAt")?.toLongOrNull())
+            return Attachments(links, actions, root.str("feedback"), root.str("handled"), root.str("handledAt")?.toLongOrNull(), root.str("docId")?.toLongOrNull(), root.str("docTitle"), root.str("image"))
         }
     }
 }

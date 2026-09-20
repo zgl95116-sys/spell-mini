@@ -15,6 +15,8 @@
         tools:ignore="QueryAllPackagesPermission" />
     <uses-permission android:name="com.android.alarm.permission.SET_ALARM" />
     <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
+    <!-- Read-only, asked for from the settings page: the agenda for briefs, and whether a proposed time is free. -->
+    <uses-permission android:name="android.permission.READ_CALENDAR" />
 
     <application
         android:name=".App"
@@ -33,6 +35,26 @@
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- The way in from other apps: the share sheet, and the entry in the menu shown for selected text. -->
+        <activity
+            android:name=".share.ShareActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:label="Spell Mini"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+                <data android:mimeType="image/*" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.PROCESS_TEXT" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
             </intent-filter>
         </activity>
 
@@ -66,6 +88,15 @@
         <receiver
             android:name=".actions.ReminderReceiver"
             android:exported="false" />
+
+        <!-- A change of time zone is the cheapest "you have landed" signal; it is on the list of broadcasts a manifest may still receive. -->
+        <receiver
+            android:name=".sources.TimezoneReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.TIMEZONE_CHANGED" />
+            </intent-filter>
+        </receiver>
 
         <provider
             android:name="androidx.core.content.FileProvider"

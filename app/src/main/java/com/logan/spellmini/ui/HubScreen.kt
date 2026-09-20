@@ -68,7 +68,7 @@ import kotlinx.serialization.json.put
 import java.io.File
 import java.util.Calendar
 
-private enum class HubTab(val label: String) { TRACE("通知流水"), PROFILE("画像"), SETTINGS("设置") }
+private enum class HubTab(val label: String) { TRACE("通知流水"), TASKS("在办"), PROFILE("画像"), SETTINGS("设置") }
 
 @Composable
 fun HubScreen(onBack: () -> Unit) {
@@ -90,6 +90,7 @@ fun HubScreen(onBack: () -> Unit) {
         HorizontalDivider(color = Ink.Line)
         when (tab) {
             HubTab.TRACE -> TraceTab()
+            HubTab.TASKS -> TasksTab()
             HubTab.PROFILE -> ProfileTab()
             HubTab.SETTINGS -> SettingsTab()
         }
@@ -150,7 +151,7 @@ private fun TodaySummary(events: List<NotifEvent>) {
         Calendar.getInstance().apply { set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0) }.timeInMillis
     }
     val today = events.filter { it.postedAt >= startOfDay }
-    val received = today.count { it.status != EventStatus.INTEREST }
+    val received = today.count { it.status != EventStatus.INTEREST && it.status != EventStatus.TASK }
     val patrols = today.count { it.status == EventStatus.INTEREST }
     val judged = today.filter { it.status == EventStatus.JUDGED }
     val latencies = judged.mapNotNull { it.jevLatencyMs }.sorted()

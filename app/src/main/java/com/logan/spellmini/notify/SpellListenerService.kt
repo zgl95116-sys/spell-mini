@@ -8,6 +8,7 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.logan.spellmini.Graph
 import com.logan.spellmini.data.Handled
+import com.logan.spellmini.sources.MediaSignals
 
 /** Plain snapshot of a posted notification, detached from framework objects. */
 data class RawNotification(
@@ -32,6 +33,7 @@ class SpellListenerService : NotificationListenerService() {
         Log.i(TAG, "listener connected")
         Graph.listenerConnected.value = true
         KeepAliveService.start(this)
+        MediaSignals.attach(this)
         // "首次连接来源": judge what is already sitting in the shade once, so the first open is not empty.
         if (!Graph.settings.initialSweepDone) {
             Graph.settings.initialSweepDone = true

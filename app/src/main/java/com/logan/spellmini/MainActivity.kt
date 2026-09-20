@@ -47,7 +47,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.logan.spellmini.notify.KeepAliveService
+import com.logan.spellmini.share.ShareActivity
 import com.logan.spellmini.ui.ChatScreen
+import com.logan.spellmini.ui.DocScreen
 import com.logan.spellmini.ui.FeedScreen
 import com.logan.spellmini.ui.HubScreen
 import com.logan.spellmini.ui.Ink
@@ -98,6 +100,16 @@ private fun Root(openChatSignal: Int) {
     var hubOpen by rememberSaveable { mutableStateOf(false) }
     // A feed card's "讨论" hands its content to the chat composer.
     var chatDraftContext by remember { mutableStateOf<String?>(null) }
+    var chatDraftImage by remember { mutableStateOf<String?>(null) }
+    val shared by Graph.pendingShare.collectAsState()
+    shared?.let { share ->
+        chatDraftContext = share.text?.let { ShareActivity.PREFIX + "\n" + it } ?: ShareActivity.PREFIX
+        chatDraftImage = share.imagePath
+        tab = Tab.CHAT
+        hubOpen = false
+        Graph.openDoc.value = null
+        Graph.pendingShare.value = null
+    }
     val connected by Graph.listenerConnected.collectAsState()
 
     var lastSignal by remember { mutableStateOf(openChatSignal) }
@@ -108,9 +120,15 @@ private fun Root(openChatSignal: Int) {
     }
 
     BackHandler(enabled = hubOpen) { hubOpen = false }
+    val openDoc by Graph.openDoc.collectAsState()
 
     Column(Modifier.fillMaxSize().background(androidx.compose.ui.graphics.Color.White).statusBarsPadding()) {
-        if (hubOpen) {
+        if (openDoc != null) {
+            DocScreen(
+                cardId = openDoc!!, onBack = { Graph.openDoc.value = null },
+                onRevise = { context -> chatDraftContext = context; Graph.openDoc.value = null; hubOpen = false; tab = Tab.CHAT },
+            )
+        } else if (hubOpen) {
             HubScreen(onBack = { hubOpen = false })
         } else {
             TopBar(tab = tab, onTab = { tab = it }, needsAttention = !connected, onBall = { hubOpen = true })
@@ -119,7 +137,8 @@ private fun Root(openChatSignal: Int) {
                 when (tab) {
                     Tab.CHAT -> ChatScreen(
                         pendingContext = chatDraftContext,
-                        onContextConsumed = { chatDraftContext = null },
+                        pendingImage = chatDraftImage,
+                        onContextConsumed = { chatDraftContext = null; chatDraftImage = null },
                     )
                     Tab.FEED -> FeedScreen(onDiscuss = { context ->
                         chatDraftContext = context

@@ -59,6 +59,7 @@ import coil.compose.AsyncImage
 import com.logan.spellmini.Graph
 import com.logan.spellmini.actions.Actions
 import com.logan.spellmini.agent.FeedAgent
+import com.logan.spellmini.agent.JobAgent
 import com.logan.spellmini.data.FeedCard
 import com.logan.spellmini.data.MemorySource
 import com.logan.spellmini.net.str
@@ -80,8 +81,8 @@ private fun links(jsonText: String): List<Pair<String, String>> = runCatching {
 
 /** What "讨论" carries into the chat: enough for the model to talk about the card without re-searching. */
 private fun discussionContext(card: FeedCard): String = buildString {
-    appendLine(card.title)
-    appendLine(card.body)
+    appendLine(if (card.sourceLabel.startsWith(JobAgent.DOC_LABEL)) "成品 #${card.id}《${card.title}》" else card.title)
+    appendLine(card.body.take(1_500))
     strings(card.bulletsJson).forEach { appendLine("- $it") }
     links(card.sourcesJson).forEach { (title, url) -> appendLine("来源：$title $url") }
 }.trim()
@@ -191,6 +192,8 @@ private fun FeedCardView(card: FeedCard, onDiscuss: () -> Unit) {
     val sources = remember(card.sourcesJson) { links(card.sourcesJson) }
     // Interest-patrol cards have no notification behind them, so there is nothing to jump back to.
     val fromNotification = card.eventId != null && !FeedAgent.isPatrolLabel(card.sourceLabel)
+    // A finished piece of work keeps its Markdown in `body`; the list shows its conclusion and a way in.
+    val isDoc = card.sourceLabel.startsWith(JobAgent.DOC_LABEL)
     val long = card.body.length > LONG_BODY
     val shape = RoundedCornerShape(22.dp)
 
@@ -205,11 +208,16 @@ private fun FeedCardView(card: FeedCard, onDiscuss: () -> Unit) {
                 Text(formatClock(card.createdAt), color = Ink.Faint, fontSize = 12.sp)
             }
             Text(card.title, color = Ink.Black, fontSize = 18.sp, fontWeight = FontWeight.SemiBold, lineHeight = 24.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
-            Text(
-                card.body, color = Ink.Body, fontSize = 14.5.sp, lineHeight = 22.sp, overflow = TextOverflow.Ellipsis,
-                maxLines = if (expanded) Int.MAX_VALUE else 3, modifier = Modifier.clickable { expanded = !expanded },
-            )
-            if (expanded || !long) {
+            if (isDoc) {
+                Text(card.reason, color = Ink.Body, fontSize = 14.5.sp, lineHeight = 22.sp, maxLines = 4, overflow = TextOverflow.Ellipsis)
+                Pill("打开全文", Ink.Black, filled = true) { Graph.openDoc.value = card.id }
+            } else {
+                Text(
+                    card.body, color = Ink.Body, fontSize = 14.5.sp, lineHeight = 22.sp, overflow = TextOverflow.Ellipsis,
+                    maxLines = if (expanded) Int.MAX_VALUE else 3, modifier = Modifier.clickable { expanded = !expanded },
+                )
+            }
+            if (!isDoc && (expanded || !long)) {
                 bullets.forEach { bullet ->
                     Row(verticalAlignment = Alignment.Top) {
                         Box(Modifier.padding(top = 8.dp, end = 9.dp).size(5.dp).clip(CircleShape).background(Ink.Muted))

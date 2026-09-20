@@ -32,6 +32,16 @@ interface EventDao {
     @Query("SELECT * FROM events WHERE status = 'SEEN' AND postedAt >= :since")
     suspend fun seenSince(since: Long): List<NotifEvent>
 
+    @Query("SELECT * FROM events WHERE status = 'TASK' AND postedAt >= :since")
+    suspend fun taskRunsSince(since: Long): List<NotifEvent>
+
+    /** Plain substring search over everything the listener has seen; the assistant's own rows (tasks, topics) are left out. */
+    @Query(
+        "SELECT * FROM events WHERE status IN ('JUDGED', 'FILTERED', 'ERROR', 'APP_OFF') AND postedAt >= :since " +
+            "AND (title LIKE :pattern OR text LIKE :pattern OR appName LIKE :pattern) ORDER BY postedAt DESC LIMIT :limit"
+    )
+    suspend fun search(pattern: String, since: Long, limit: Int): List<NotifEvent>
+
     @Query("SELECT * FROM events WHERE outcome = :outcome AND postedAt >= :since ORDER BY postedAt DESC LIMIT :limit")
     suspend fun withOutcomeSince(outcome: String, since: Long, limit: Int): List<NotifEvent>
 

@@ -31,6 +31,14 @@ internal object ChatTools {
     const val REFRESH_FEED = "refresh_feed"
     const val DRAFT_REPLY = "draft_reply"
     const val UNHANDLED = "list_unhandled"
+    const val READ_PAGE = "read_page"
+    const val FETCH_FEED = "fetch_feed"
+    const val SEARCH_HISTORY = "search_history"
+    const val CALENDAR = "calendar_agenda"
+    const val WATCH = "watch"
+    const val LIST_TASKS = "list_tasks"
+    const val UPDATE_TASK = "update_task"
+    const val START_JOB = "start_job"
 
     private class Param(val type: String, val description: String, val options: List<String>? = null)
 
@@ -75,9 +83,71 @@ internal object ChatTools {
 
     private val schedule = tool(
         Actions.SCHEDULE,
-        "到某个时间点由你自己去办一件事（联网查资料、整理汇总），办完把结果发给用户并响铃。用户说「到时候帮我查一下/整理一份/盯一下」时用。调用即生效，可撤销。",
-        listOf("time_iso", "instruction"),
-        mapOf("time_iso" to Param("string", ISO), "instruction" to Param("string", "到点要办的事，写完整：查什么、整理成什么样。到时你只看得到这句话和聊天记录")),
+        "到某个时间点由你自己去办一件事（联网查资料、整理汇总），办完把结果发给用户并响铃。用户说「到时候帮我查一下/整理一份/盯一下」时用。" +
+            "只办一次：填 time_iso。要重复（每天简报、每周周报）：填 repeat，再按规则填 at、weekday 或 every_hours，它会出现在「在办」里。调用即生效，可撤销。",
+        listOf("instruction"),
+        mapOf(
+            "instruction" to Param("string", "到点要办的事，写完整：查什么、整理成什么样。到时你只看得到这句话、上次的结果和聊天记录"),
+            "time_iso" to Param("string", "只办一次时填：$ISO"),
+            "repeat" to Param("string", "重复规则，只办一次就不填", listOf("daily", "weekdays", "weekly", "hours")),
+            "at" to Param("string", "daily / weekdays / weekly 的时刻，HH:mm，如 08:00"),
+            "weekday" to Param("integer", "weekly 用：1 是周一，7 是周日"),
+            "every_hours" to Param("integer", "hours 用：每隔几小时，最少 1"),
+            "title" to Param("string", "在「在办」里显示的短名字，如「每日简报」，可省略"),
+        ),
+    )
+
+    private val watch = tool(
+        WATCH,
+        "替用户长期盯着一件事，定时检查，只有条件满足或有实质变化才告诉他，其余时候不出声。用户说「盯着……有了/低于/一旦……告诉我」时用。" +
+            "能用订阅源就填 feed_url（比搜索可靠得多）：RSS 或 Atom 地址，GitHub 项目的新版本是 https://github.com/<owner>/<repo>/releases.atom，" +
+            "arXiv 是 https://export.arxiv.org/api/query?search_query=all:<关键词>&sortBy=submittedDate&sortOrder=descending。" +
+            "机票、商品的实时价格靠搜索查不准，接下这类之前要如实告诉他只能当参考。",
+        listOf("what", "condition"),
+        mapOf(
+            "what" to Param("string", "盯什么，写具体"),
+            "condition" to Param("string", "什么情况下要告诉他，如「有新版本发布」「出现量产时间表」"),
+            "every_hours" to Param("integer", "多久查一次，小时，默认 6，最少 1"),
+            "feed_url" to Param("string", "订阅源地址，可省略"),
+            "title" to Param("string", "短名字，可省略"),
+        ),
+    )
+
+    private val tasks = listOf(
+        tool(LIST_TASKS, "列出「在办」里的所有事项：定期任务、盯着的事、等下文的事，带编号。用户问「你现在在帮我盯什么」或要改某一项时先调用。", emptyList(), emptyMap()),
+        tool(
+            UPDATE_TASK, "暂停、恢复、删除「在办」里的一项，或者现在就跑一次。", listOf("id", "action"),
+            mapOf("id" to Param("integer", "list_tasks 里的编号"), "action" to Param("string", "做什么", listOf("pause", "resume", "delete", "run_now"))),
+        ),
+    )
+
+    private val readPage = tool(
+        READ_PAGE, "打开一个网页读正文。搜索结果只有几行摘要，要细节（时间表、参数、价格、步骤）就读原文。靠脚本渲染或要登录的页面读不到，会返回 error，换一个来源。",
+        listOf("url"), mapOf("url" to Param("string", "https 网址")),
+    )
+    private val fetchFeed = tool(
+        FETCH_FEED, "读一个 RSS 或 Atom 订阅源，返回最新的条目。GitHub 项目发布、arXiv 新论文、博客更新都有订阅地址。",
+        listOf("url"), mapOf("url" to Param("string", "订阅源地址")),
+    )
+    private val searchHistory = tool(
+        SEARCH_HISTORY, "在手机最近两周收到过的通知里按关键词查找。用户问「上周物业那条通知」「这周花了多少钱」「某某后来回我没有」时用。",
+        listOf("keywords"), mapOf("keywords" to Param("string", "一到四个关键词，空格分开，如「物业 停水」"), "days" to Param("integer", "往回找几天，默认 7，最多 14")),
+    )
+    private val calendarAgenda = tool(
+        CALENDAR, "读用户手机日历里接下来几天的日程（只读）。别人约时间、做简报、排行程之前先看一眼。",
+        emptyList(), mapOf("days" to Param("integer", "看几天，默认 2，最多 14")),
+    )
+    private val startJob = tool(
+        START_JOB,
+        "把一件需要多步调研才能交付的活交给后台去做：行程、选购对比、专题周报、方案整理。后台会多轮搜索、读网页，最后交一页成品，做完通知他，" +
+            "期间他可以继续聊天。一两次搜索就能答的问题不要用它。",
+        listOf("title", "goal", "deliverable"),
+        mapOf(
+            "title" to Param("string", "这件活的短名字，几个字，如「磨豆机对比」「京都行程」"),
+            "goal" to Param("string", "要解决什么，把他给的约束都带上（时间、预算、同行的人、偏好）。只写事情本身，不要写他的姓名、职业这类身份信息"),
+            "deliverable" to Param("string", "要交什么样的成品，如「按天排的行程，含交通和备选」「三款的对比表加结论」"),
+            "base_doc_id" to Param("integer", "在上一版成品上修改时，填那份成品的编号；否则省略"),
+        ),
     )
 
     private val feedControl = listOf(
@@ -183,16 +253,20 @@ internal object ChatTools {
      * only tools that fit "here is what I noticed, and one tap if you want it" are offered.
      */
     fun forMode(mode: TurnMode): JsonArray = buildJsonArray {
-        add(search); add(remember); add(reminder(mode)); add(schedule)
+        add(search); add(readPage); add(remember); add(reminder(mode)); add(schedule)
         when (mode) {
             TurnMode.USER -> {
+                add(startJob); add(watch); tasks.forEach { add(it) }
+                add(fetchFeed); add(searchHistory); add(calendarAgenda)
                 add(draftReply(mode)); add(unhandled)
                 feedControl.forEach { add(it) }
                 listOf(calendar, alarm, timer, openApp, openLink, dial, compose, map, settings, share, copy, contact, music, camera).forEach { add(it) }
             }
             // Every proactive message already carries a "查看原消息" button, so open_notification is not offered.
-            TurnMode.TRIGGER -> listOf(draftReply(mode), calendar, alarm, openLink, dial, compose, map, copy, contact).forEach { add(it) }
-            TurnMode.SCHEDULED -> listOf(calendar, openLink, dial, compose, map, copy).forEach { add(it) }
+            TurnMode.TRIGGER -> listOf(draftReply(mode), calendarAgenda, searchHistory, calendar, alarm, openLink, dial, compose, map, copy, contact).forEach { add(it) }
+            // A task that came due works alone: it may look things up everywhere, hand a big piece of work to a job, and
+            // leave buttons, but it does not set up further tasks of its own.
+            TurnMode.SCHEDULED -> listOf(startJob, fetchFeed, searchHistory, calendarAgenda, unhandled, draftReply(TurnMode.USER), calendar, openLink, dial, compose, map, copy).forEach { add(it) }
         }
     }
 }

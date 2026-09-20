@@ -13,6 +13,8 @@
                 <action android:name="com.logan.spellmini.DEBUG_SEND" />
                 <action android:name="com.logan.spellmini.DEBUG_NOTIFY" />
                 <action android:name="com.logan.spellmini.DEBUG_PROFILE" />
+                <action android:name="com.logan.spellmini.DEBUG_LOOPS" />
+                <action android:name="com.logan.spellmini.DEBUG_SHARE_IMAGE" />
             </intent-filter>
         </receiver>
     </application>

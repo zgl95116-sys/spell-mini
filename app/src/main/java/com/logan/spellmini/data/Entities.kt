@@ -13,6 +13,7 @@ object EventStatus {
     const val ERROR = "ERROR"
     const val INTEREST = "INTEREST"   // not a notification: one topic of a profile-driven feed run, logged for the trace
     const val SEEN = "SEEN"           // not a notification either: the user dealt with one (see [Handled]); filterReason says how
+    const val TASK = "TASK"           // one run of a task or a job, logged so its cost and its silences are as visible as a notification's
 }
 
 /**
@@ -125,6 +126,12 @@ object MemorySource {
 
     /** What to bring up or leave out, distilled from his thumbs on proactive messages and from "should have told me". */
     const val RULE = "规则"
+
+    /** A [Task] (recurring job, watch, open loop) kept as JSON. Never shown as a fact and never sent with the profile. */
+    const val TASK = "任务"
+
+    /** Sources that are instructions or bookkeeping rather than facts about the user. */
+    val NOT_FACTS = setOf(FOLLOW, RULE, TASK)
 }
 
 @Entity(tableName = "messages", indices = [Index("createdAt")])

@@ -40,18 +40,21 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import com.logan.spellmini.Graph
 
-private data class SystemStatus(val listener: Boolean, val battery: Boolean, val canNotify: Boolean)
+private data class SystemStatus(val listener: Boolean, val battery: Boolean, val canNotify: Boolean, val calendar: Boolean)
 
 private fun readStatus(context: Context): SystemStatus = SystemStatus(
     listener = NotificationManagerCompat.getEnabledListenerPackages(context).contains(context.packageName),
     battery = context.getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(context.packageName),
     canNotify = Build.VERSION.SDK_INT < 33 ||
         ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED,
+    calendar = ContextCompat.checkSelfPermission(context, Manifest.permission.READ_CALENDAR) == PackageManager.PERMISSION_GRANTED,
 )
 
 private data class Preset(val label: String, val app: String, val title: String, val text: String)
@@ -72,6 +75,7 @@ fun SettingsTab() {
     val version by settings.version.collectAsState()
     var status by remember { mutableStateOf(readStatus(context)) }
     val connected by Graph.listenerConnected.collectAsState()
+    val askCalendar = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { status = readStatus(context) }
     // Coming back from a system settings page must refresh the three status rows.
     LifecycleResumeEffect(Unit) {
         status = readStatus(context)
@@ -115,6 +119,12 @@ fun SettingsTab() {
                     .putExtra(SystemSettings.EXTRA_APP_PACKAGE, context.packageName).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             )
         }
+        StatusRow(
+            title = "读取日历（只读）",
+            detail = if (status.calendar) "已允许。简报会带上今天的日程，别人约时间时我会先看你有没有空。" else "没开也能用。开了之后简报带日程，拟回复时知道你那会儿有没有安排。只读，不会改你的日历。",
+            ok = status.calendar,
+            action = "去允许",
+        ) { askCalendar.launch(Manifest.permission.READ_CALENDAR) }
         StatusRow(
             title = "OpenRouter key",
             detail = if (Graph.api.hasKey) "已随调试包内置。这个安装包不要外传。" else "安装包里没有 key：在 local.properties 写入后重新构建。",

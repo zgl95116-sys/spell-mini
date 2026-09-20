@@ -3,6 +3,8 @@ package com.logan.spellmini
 import android.app.Application
 import com.logan.spellmini.agent.ChatAgent
 import com.logan.spellmini.agent.FeedAgent
+import com.logan.spellmini.agent.JobAgent
+import com.logan.spellmini.agent.LoopAgent
 import com.logan.spellmini.agent.ProfileAgent
 import com.logan.spellmini.data.AppDb
 import com.logan.spellmini.data.ChatMsg
@@ -11,6 +13,7 @@ import com.logan.spellmini.data.MsgRole
 import com.logan.spellmini.data.Settings
 import com.logan.spellmini.net.OpenRouter
 import com.logan.spellmini.pipeline.Pipeline
+import com.logan.spellmini.tasks.TaskRunner
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -43,6 +46,18 @@ object Graph {
         private set
     lateinit var profile: ProfileAgent
         private set
+    lateinit var tasks: TaskRunner
+        private set
+    lateinit var jobs: JobAgent
+        private set
+    lateinit var loops: LoopAgent
+        private set
+
+    /** Something another app just handed over; the chat screen picks it up and puts it next to the composer. */
+    val pendingShare = MutableStateFlow<com.logan.spellmini.share.Shared?>(null)
+
+    /** Set to a feed card id to open that finished piece of work full screen. */
+    val openDoc = MutableStateFlow<Long?>(null)
 
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     val listenerConnected = MutableStateFlow(false)
@@ -61,11 +76,15 @@ object Graph {
         chat = ChatAgent(application, db, api, scope, ::profileText)
         feed = FeedAgent(db, settings, api, ::profileText)
         profile = ProfileAgent(db, settings, api)
+        tasks = TaskRunner(application, db, settings)
+        jobs = JobAgent(application, db, settings, api, scope, ::profileText)
+        loops = LoopAgent(db, settings, api)
+        if (settings.lastTimezone.isBlank()) settings.lastTimezone = java.util.TimeZone.getDefault().id
         pipeline = Pipeline(db, settings, api, scope, ::profileText).apply {
             onChat = chat::onTrigger
             onFeed = feed::generate
             onSecondJudge = chat::secondJudge
-            afterJudged = profile::maybeAutoRun
+            afterJudged = { profile.maybeAutoRun(); loops.maybeRun() }
             onHandled = chat::markHandled
         }
         pipeline.recoverOnStart()
@@ -83,6 +102,8 @@ object Graph {
             greetOnce()
             quietOtherAssistantsOnce()
             chat.rearmTimers()
+            tasks.rearmAll()
+            jobs.recoverOnStart()
         }
     }
 
@@ -122,7 +143,7 @@ object Graph {
     suspend fun profileText(): String {
         val mine = maskSecrets(settings.userProfile.trim()).take(OWN_BUDGET)
         val entries = db.memory().list()
-        val learned = entries.filter { it.source != MemorySource.FOLLOW && it.source != MemorySource.RULE }.joinToString("\n") { "- " + it.text }.take(LEARNED_BUDGET)
+        val learned = entries.filter { it.source !in MemorySource.NOT_FACTS }.joinToString("\n") { "- " + it.text }.take(LEARNED_BUDGET)
         val follows = entries.filter { it.source == MemorySource.FOLLOW }.joinToString("\n") { "- " + it.text }
         // His own verdicts on what was worth raising. They reach JEV, the second judge and the chat model alike.
         val rules = entries.filter { it.source == MemorySource.RULE }.joinToString("\n") { "- " + it.text }.take(RULES_BUDGET)

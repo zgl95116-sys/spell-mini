@@ -199,6 +199,8 @@ class FeedAgent(
         }.ifBlank { "（没有）" }
         val resting = if (manual || focus != null) emptySet() else follows.filter { now - (lastServed[it] ?: 0) < FOLLOW_REVISIT_MS }.toSet()
 
+        val playing = if (settings.mediaSignalEnabled) settings.recentMedia.take(10).joinToString("\n") { "- $it" }.ifBlank { "（没有）" } else "（没有）"
+
         val brief = when {
             focus != null -> "他刚刚在聊天里点名要看「$focus」。这一轮的选题全部围绕它，每个选题取一个不同的角度（最新进展、实用信息、不同来源的看法），找他还没看过的内容。"
             manual -> "这一轮是他手动点的「再来一批」，说明他想看新的：给出的选题必须和上面做过的明显不同。"
@@ -240,6 +242,8 @@ class FeedAgent(
                 |$said
                 |最近 24 小时和他有关的通知：
                 |$happening
+                |他最近在听、在看的（播放器里的标题，越靠前越新）：
+                |$playing
                 |
                 |用户画像（长期兴趣）：
                 |${profile.ifBlank { "（空）" }}
