@@ -19,6 +19,7 @@ import com.logan.spellmini.net.obj
 import com.logan.spellmini.net.str
 import com.logan.spellmini.notify.RawNotification
 import com.logan.spellmini.notify.SpellListenerService
+import com.logan.spellmini.sources.Subscriptions
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -81,6 +82,7 @@ class Pipeline(
     private val jevSlots = Semaphore(4)
     private val feedSlots = Semaphore(2)
     private val chatGate = Mutex()
+    private val itemGate = Mutex()
     private val lastSkipLog = HashMap<String, Long>()
 
     /** Newest message time seen per notification key; only touched under [lock]. */
@@ -135,6 +137,22 @@ class Pipeline(
         ),
         null,
     )
+
+    /**
+     * A new item from a subscribed source. It is judged like a notification, but there is no burst to wait out and no
+     * app switch to consult (the source has its own), so it goes straight to the verdict.
+     */
+    suspend fun ingestItem(pkg: String, appName: String, key: String, title: String, text: String, category: String?) {
+        if (!settings.pipelineEnabled || !api.hasKey) return
+        if (db.events().latestByKey(key) != null) return
+        val id = db.events().insert(
+            NotifEvent(
+                sbnKey = key, pkg = pkg, appName = appName, title = title.take(200), text = text.take(MAX_ITEM_TEXT), category = category,
+                postedAt = System.currentTimeMillis(), synthetic = true, status = EventStatus.QUEUED,
+            )
+        )
+        scope.launch { runCatching { judge(id) }.onFailure { Log.e(TAG, "judge failed for item $id", it) } }
+    }
 
     /**
      * Notifications waiting for their quiet window only live in memory. After a process kill they would sit at
@@ -271,10 +289,30 @@ class Pipeline(
     }
 
     private suspend fun judge(eventId: Long) {
-        var event = db.events().get(eventId) ?: return
+        val queued = db.events().get(eventId) ?: return
+        // Items are judged one after another: each has to see how the ones before it were routed, or two feeds
+        // carrying the same story in the same round would both get through. At a third of a second each this is cheap.
+        val (event, finalRoute) = if (Subscriptions.isItem(queued)) itemGate.withLock { verdictFor(queued) } else verdictFor(queued)
+
+        val downstream = runCatching { dispatch(event, finalRoute) }
+            .getOrElse { Downstream(Outcome.ERROR, it.message?.take(300) ?: it.javaClass.simpleName) }
+        db.events().update(
+            event.copy(
+                outcome = downstream.outcome, outcomeNote = downstream.note, outcomeRefId = downstream.refId,
+                downstreamCostUsd = downstream.costUsd, downstreamLatencyMs = downstream.latencyMs,
+            )
+        )
+        runCatching { afterJudged?.invoke() }
+    }
+
+    /** JEV's verdict plus whatever overrides it, written to the trace row. Returns the row and the route to act on. */
+    private suspend fun verdictFor(queued: NotifEvent): Pair<NotifEvent, String> {
+        var event = queued
+        val eventId = queued.id
         val criteria = settings.criteria
+        val item = Subscriptions.isItem(event)
         val state = buildState(event)
-        val questions = buildQuestions(criteria)
+        val questions = buildQuestions(criteria, item)
 
         val verdict = runCatching { jevSlots.withPermit { api.decide(state, questions) } }
         event = verdict.fold(
@@ -303,11 +341,33 @@ class Pipeline(
 
         var finalRoute = event.route ?: Route.REVIEW
         var note: String? = null
+        // Several feeds carry the same story. JEV answers this in the same request as the route, so it costs nothing;
+        // a middling answer is left for the feed writer, which reads the cards themselves.
+        val sameNews = verdict.getOrNull()?.answers?.obj(REPEAT)?.dbl("noul") ?: 0.0
+        // "Matches his interests" is true of nearly everything in a feed he chose, so a card also needs closeness.
+        val fit = verdict.getOrNull()?.answers?.obj(FIT)?.dbl("score")
+        val bar = if (Subscriptions.isOwnPick(event)) OWN_PICK_FIT else settings.subscriptionFitTenths / 10.0
+        if (item && fit != null) note = "贴合度 ${"%.1f".format(fit)}/3"
+        if (item && sameNews >= SAME_NEWS && finalRoute != Route.IGNORE) {
+            finalRoute = Route.IGNORE
+            note = listOfNotNull(note, "和 Feed 里已有的卡是同一条消息（JEV ${"%.2f".format(sameNews)}），不再重复").joinToString(" · ")
+        } else if (item && finalRoute == Route.FEED && fit != null && fit < bar) {
+            finalRoute = Route.IGNORE
+            note = "$note，低于成卡门槛 ${"%.1f".format(bar)}：和你的关注点不够近"
+        }
         // JEV is there to protect recall. "ignore" by a nose (a colleague's @-mention came out ignore 0.54 / chat 0.46)
         // is not a verdict to drop a notification on; on a real phone this happened about twice a day.
         val chatChance = verdict.getOrNull()?.answers?.obj("route")?.obj("probabilities")?.dbl(Route.CHAT) ?: 0.0
         val closeCall = finalRoute == Route.IGNORE && chatChance >= CLOSE_CALL
-        if (finalRoute == Route.REVIEW || closeCall) {
+        if (item) {
+            // An item nobody sent him is not worth a second opinion from the chat model: unsure means a card at most,
+            // and an item that could not be judged at all is let go.
+            if (finalRoute == Route.REVIEW) {
+                val close = verdict.isSuccess && (fit ?: 0.0) >= bar
+                finalRoute = if (close) Route.FEED else Route.IGNORE
+                note = listOfNotNull(note, if (close) "JEV 拿不准去向，按 Feed 处理" else if (verdict.isSuccess) "JEV 拿不准去向，贴合度也不够，放过" else "JEV 没判成，这条放过").joinToString(" · ")
+            }
+        } else if (finalRoute == Route.REVIEW || closeCall) {
             val second = onSecondJudge?.let { judgeFn -> runCatching { judgeFn(event) }.getOrNull() }
             finalRoute = second?.first ?: Route.IGNORE
             note = (if (closeCall) "JEV 判忽略但 chat 概率 ${"%.2f".format(chatChance)}，交主模型复核：" else "") + (second?.second ?: "二判不可用，按忽略处理")
@@ -316,16 +376,7 @@ class Pipeline(
         val waiting = finalRoute == Route.CHAT || finalRoute == Route.FEED
         event = event.copy(finalRoute = finalRoute, secondJudgeNote = note, outcome = if (waiting) Outcome.PENDING else null)
         db.events().update(event)
-
-        val downstream = runCatching { dispatch(event, finalRoute) }
-            .getOrElse { Downstream(Outcome.ERROR, it.message?.take(300) ?: it.javaClass.simpleName) }
-        db.events().update(
-            event.copy(
-                outcome = downstream.outcome, outcomeNote = downstream.note, outcomeRefId = downstream.refId,
-                downstreamCostUsd = downstream.costUsd, downstreamLatencyMs = downstream.latencyMs,
-            )
-        )
-        runCatching { afterJudged?.invoke() }
+        return event to finalRoute
     }
 
     private suspend fun dispatch(event: NotifEvent, route: String): Downstream {
@@ -333,14 +384,30 @@ class Pipeline(
         return when (route) {
             // Checked under a lock together with the turn itself: verdicts arrive in parallel, and counting only
             // finished turns would let a burst (the first sweep) slip past the cap.
-            Route.CHAT -> chatGate.withLock {
+            // A busy feed must not turn into a chatty assistant: past a few messages a day, its items are cards at most.
+            Route.CHAT -> if (Subscriptions.isItem(event) && db.events().countItemOutcomeSince(Outcome.CHAT_SENT, now - DAY_MS) >= ITEM_MESSAGES_PER_DAY) {
+                feedSlots.withPermit { onFeed?.invoke(event) }?.let { it.copy(note = "订阅内容今天已经主动说过 $ITEM_MESSAGES_PER_DAY 条，这条只进 Feed：${it.note.orEmpty()}".take(200)) }
+                    ?: Downstream(Outcome.NONE, "Feed 尚未接入")
+            } else chatGate.withLock {
                 if (db.events().countOutcomeSince(Outcome.CHAT_SENT, System.currentTimeMillis() - HOUR_MS) >= settings.chatPerHourCap) {
-                    Downstream(Outcome.CAPPED, "已达每小时主动消息上限 ${settings.chatPerHourCap}，这条没有交给主模型")
+                    // Over the hourly limit a notification waits in the trace; an item can still be a card, so it is not lost.
+                    val card = if (Subscriptions.isItem(event)) feedSlots.withPermit { onFeed?.invoke(event) } else null
+                    card?.copy(note = "已达每小时主动消息上限 ${settings.chatPerHourCap}，这条只进 Feed：${card.note.orEmpty()}".take(200))
+                        ?: Downstream(Outcome.CAPPED, "已达每小时主动消息上限 ${settings.chatPerHourCap}，这条没有交给主模型")
                 } else {
-                    onChat?.invoke(event) ?: Downstream(Outcome.NONE, "Chat 尚未接入")
+                    val spoken = onChat?.invoke(event) ?: Downstream(Outcome.NONE, "Chat 尚未接入")
+                    // An item that was not worth a message is still one he subscribed to: it becomes a card instead.
+                    if (Subscriptions.isItem(event) && spoken.outcome == Outcome.CHAT_SILENT && spoken.note?.startsWith(ALREADY_TOLD) != true) {
+                        val card = feedSlots.withPermit { onFeed?.invoke(event) }
+                        card?.copy(note = "没到要开口的程度（${spoken.note.orEmpty().take(40)}），改进 Feed：${card.note.orEmpty()}".take(200), costUsd = (card.costUsd ?: 0.0) + (spoken.costUsd ?: 0.0)) ?: spoken
+                    } else spoken
                 }
             }
             Route.FEED -> when {
+                Subscriptions.isItem(event) ->
+                    if (db.events().countItemOutcomeSince(Outcome.FEED_CARD, now - DAY_MS) >= settings.subscriptionPerDayCap) {
+                        Downstream(Outcome.CAPPED, "已达每日订阅卡片上限 ${settings.subscriptionPerDayCap}")
+                    } else feedSlots.withPermit { onFeed?.invoke(event) ?: Downstream(Outcome.NONE, "Feed 尚未接入") }
                 db.events().countNotificationOutcomeSince(Outcome.FEED_CARD, now - DAY_MS) >= settings.feedPerDayCap ->
                     Downstream(Outcome.CAPPED, "已达每日 Feed 上限 ${settings.feedPerDayCap}")
                 else -> feedSlots.withPermit { onFeed?.invoke(event) ?: Downstream(Outcome.NONE, "Feed 尚未接入") }
@@ -353,6 +420,12 @@ class Pipeline(
         val now = System.currentTimeMillis()
         val recent = db.events().recentFromApp(event.pkg, now - 2 * HOUR_MS, event.id, 5)
         val profile = profileText().ifBlank { "(empty: the user has not described themselves yet)" }
+        val item = Subscriptions.isItem(event)
+        // Read before the builder: its lambdas cannot suspend.
+        val liked = if (item) db.feed().likedTitles(TASTE_SIZE) else emptyList()
+        val dismissed = if (item) db.feed().dismissedTitles(TASTE_SIZE) else emptyList()
+        // Cards he has, plus items that became a message instead of a card: either way he already knows.
+        val recentCards = if (item) (db.feed().recentTitles(RECENT_CARD_TITLES) + db.events().itemTitlesRouted(now - 3 * DAY_MS, event.id, RECENT_CARD_TITLES)).distinct() else emptyList()
         return buildJsonObject {
             // JEV is weak at date arithmetic, so every relative time is computed here.
             put("now", SimpleDateFormat(CLOCK_PATTERN, Locale.CHINA).format(Date(now)))
@@ -367,7 +440,16 @@ class Pipeline(
                     })
                 }
             }
+            if (item) {
+                // What he kept and what he threw out is the cheapest description of his taste there is.
+                putJsonObject("taste") {
+                    putJsonArray("liked") { liked.forEach { add(kotlinx.serialization.json.JsonPrimitive(it)) } }
+                    putJsonArray("dismissed") { dismissed.forEach { add(kotlinx.serialization.json.JsonPrimitive(it)) } }
+                }
+                putJsonArray("recent_cards") { recentCards.forEach { add(kotlinx.serialization.json.JsonPrimitive(it)) } }
+            }
             putJsonObject("new_notification") {
+                if (item) put("kind", "subscription")
                 put("app", event.appName)
                 put("category", event.category ?: "unknown")
                 put("title", event.title)
@@ -378,10 +460,10 @@ class Pipeline(
         }
     }
 
-    private fun buildQuestions(criteria: Criteria): JsonObject = buildJsonObject {
+    private fun buildQuestions(criteria: Criteria, item: Boolean): JsonObject = buildJsonObject {
         putJsonObject("route") {
             put("type", "choice")
-            put("instructions", Criteria.COMMON + criteria.instructions)
+            put("instructions", Criteria.COMMON + criteria.instructions + if (item) Criteria.SUBSCRIPTION_INSTRUCTIONS else "")
             putJsonObject("criteria") {
                 put(Route.CHAT, criteria.chat)
                 put(Route.FEED, criteria.feed)
@@ -394,6 +476,17 @@ class Pipeline(
             put("type", "score")
             put("instructions", Criteria.COMMON + Criteria.URGENCY_INSTRUCTIONS)
             put("criteria", buildJsonArray { Criteria.URGENCY_LEVELS.forEach { add(kotlinx.serialization.json.JsonPrimitive(it)) } })
+        }
+        if (item) {
+            putJsonObject(REPEAT) {
+                put("type", "noul")
+                put("instructions", Criteria.COMMON + Criteria.REPEAT_INSTRUCTIONS)
+            }
+            putJsonObject(FIT) {
+                put("type", "score")
+                put("instructions", Criteria.COMMON + Criteria.FIT_INSTRUCTIONS)
+                put("criteria", buildJsonArray { Criteria.FIT_LEVELS.forEach { add(kotlinx.serialization.json.JsonPrimitive(it)) } })
+            }
         }
     }
 
@@ -408,6 +501,17 @@ class Pipeline(
         private const val RETENTION_MS = 14 * DAY_MS
         private const val CLOCK_PATTERN = "yyyy-MM-dd HH:mm EEEE"
         private const val CLOSE_CALL = 0.40
+        private const val REPEAT = "repeat"
+        private const val FIT = "fit"
+        private const val SAME_NEWS = 0.80
+        private const val TASTE_SIZE = 6
+        private const val RECENT_CARD_TITLES = 25
+        private const val MAX_ITEM_TEXT = 1_200
+        private const val ITEM_MESSAGES_PER_DAY = 4
+        private const val OWN_PICK_FIT = 1.0
+
+        /** How the chat agent's silence note begins when the reason is that he already knows; no card is made then. */
+        const val ALREADY_TOLD = "已说过"
         private const val RESTART_MARGIN_MS = 60_000L
         private const val REPOST_GRACE_MS = 3_000L
         private const val REPOSTED = "没有新消息，只是被 App 重新贴出"

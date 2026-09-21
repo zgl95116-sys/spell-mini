@@ -42,7 +42,7 @@ fun ProfileTab() {
     val version by settings.version.collectAsState()
     // Tasks live in the same table as JSON; they have their own page and are no business of the profile.
     val allEntries by Graph.db.memory().all().collectAsState(initial = emptyList())
-    val entries = allEntries.filter { it.source != com.logan.spellmini.data.MemorySource.TASK }
+    val entries = allEntries.filter { it.source != com.logan.spellmini.data.MemorySource.TASK && it.source != com.logan.spellmini.data.MemorySource.SOURCE }
     val logs by Graph.db.memory().logs().collectAsState(initial = emptyList())
     val running by Graph.profile.running.collectAsState()
     val scope = rememberCoroutineScope()

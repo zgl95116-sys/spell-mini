@@ -54,6 +54,11 @@ fun ExtendedSettings() {
             { settings.jobBudgetCents = (settings.jobBudgetCents - 5).coerceAtLeast(5) }, { settings.jobBudgetCents = (settings.jobBudgetCents + 5).coerceAtMost(100) })
         ToggleRow("留意该有下文的事", "从通知里记下「周五前回你」「预计 23 日送达」这类有时间的事，到点没下文就问你一句；有下文就悄悄结掉。每三小时最多看一次。", settings.loopsEnabled) { settings.loopsEnabled = it }
         ToggleRow("把正在播放的当作兴趣信号", "只记播放器里的标题，只用来给 Feed 选题。", settings.mediaSignalEnabled) { settings.mediaSignalEnabled = it }
+        ToggleRow("订阅源", "你订阅的 RSS 和公开列表，每条更新都像通知一样过一遍分流；在 Feed 顶上增删。0 点到 7 点不检查。判一条约 \$0.0001，成一张卡约 \$0.0003（不联网搜索）。", settings.subscriptionsEnabled) { settings.subscriptionsEnabled = it }
+        Stepper("订阅有多挑", "JEV 给每条更新打一个和你的贴合度（0 到 3）：1 是你关注的领域里的一般新闻，2 是你点名的主题，3 是你手头正在做的事。低于这个数的不成卡。", "%.1f".format(settings.subscriptionFitTenths / 10.0),
+            onMinus = { settings.subscriptionFitTenths -= 1 }, onPlus = { settings.subscriptionFitTenths += 1 })
+        Stepper("订阅每天最多几张卡", "和通知触发的、按兴趣生成的上限分开算", "${settings.subscriptionPerDayCap} 张",
+            onMinus = { settings.subscriptionPerDayCap -= 10 }, onPlus = { settings.subscriptionPerDayCap += 10 })
         ToggleRow("定时按兴趣生成 Feed", "0 点到 7 点不跑。每张卡约 \$0.01，每一次尝试都会记进通知流水。", settings.interestFeedEnabled) { settings.interestFeedEnabled = it }
         Stepper("多久一批", "到点后在后台跑；打开 Feed 时到点了也会跑", "${settings.interestIntervalMin} 分钟",
             onMinus = { settings.interestIntervalMin -= 15 }, onPlus = { settings.interestIntervalMin += 15 })

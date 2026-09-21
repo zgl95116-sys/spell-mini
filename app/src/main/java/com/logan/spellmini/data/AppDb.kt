@@ -45,7 +45,8 @@ interface EventDao {
     @Query("SELECT * FROM events WHERE outcome = :outcome AND postedAt >= :since ORDER BY postedAt DESC LIMIT :limit")
     suspend fun withOutcomeSince(outcome: String, since: Long, limit: Int): List<NotifEvent>
 
-    @Query("SELECT * FROM events WHERE status = 'JUDGED' ORDER BY postedAt DESC LIMIT :limit")
+    /** What the phone itself received. Items of subscribed sources say nothing about his life, so the profile and the open loops never read them. */
+    @Query("SELECT * FROM events WHERE status = 'JUDGED' AND pkg NOT LIKE 'feed.%' ORDER BY postedAt DESC LIMIT :limit")
     suspend fun recentJudged(limit: Int): List<NotifEvent>
 
     /** Same-source context handed to JEV so it can spot repeats and updates. */
@@ -65,8 +66,16 @@ interface EventDao {
     @Query("SELECT COUNT(*) FROM events WHERE outcome = :outcome AND postedAt >= :since")
     suspend fun countOutcomeSince(outcome: String, since: Long): Int
 
-    @Query("SELECT COUNT(*) FROM events WHERE outcome = :outcome AND postedAt >= :since AND status != 'INTEREST'")
+    @Query("SELECT COUNT(*) FROM events WHERE outcome = :outcome AND postedAt >= :since AND status != 'INTEREST' AND pkg NOT LIKE 'feed.%'")
     suspend fun countNotificationOutcomeSince(outcome: String, since: Long): Int
+
+    /** Titles of subscribed items already on their way to him as a card or a message, newest first: the repeat check reads them. */
+    @Query("SELECT title FROM events WHERE pkg LIKE 'feed.%' AND finalRoute IN ('feed', 'chat') AND postedAt >= :since AND id != :excludeId ORDER BY id DESC LIMIT :limit")
+    suspend fun itemTitlesRouted(since: Long, excludeId: Long, limit: Int): List<String>
+
+    /** Items of subscribed sources (their pkg starts with `feed.`) have a cap of their own. */
+    @Query("SELECT COUNT(*) FROM events WHERE outcome = :outcome AND postedAt >= :since AND pkg LIKE 'feed.%'")
+    suspend fun countItemOutcomeSince(outcome: String, since: Long): Int
 
     @Query("SELECT COUNT(*) FROM events WHERE outcome = :outcome AND postedAt >= :since AND status = 'INTEREST'")
     suspend fun countInterestOutcomeSince(outcome: String, since: Long): Int
@@ -75,7 +84,7 @@ interface EventDao {
     @Query("SELECT * FROM events WHERE status = 'INTEREST' AND postedAt >= :since ORDER BY postedAt DESC LIMIT 60")
     suspend fun recentInterestTopics(since: Long): List<NotifEvent>
 
-    @Query("SELECT COUNT(*) FROM events WHERE status = 'JUDGED' AND id > :afterId")
+    @Query("SELECT COUNT(*) FROM events WHERE status = 'JUDGED' AND id > :afterId AND pkg NOT LIKE 'feed.%'")
     suspend fun countJudgedAfter(afterId: Long): Int
 
     @Query("SELECT MAX(id) FROM events") suspend fun maxId(): Long?

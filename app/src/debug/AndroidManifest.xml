@@ -15,6 +15,8 @@
                 <action android:name="com.logan.spellmini.DEBUG_PROFILE" />
                 <action android:name="com.logan.spellmini.DEBUG_LOOPS" />
                 <action android:name="com.logan.spellmini.DEBUG_SHARE_IMAGE" />
+                <action android:name="com.logan.spellmini.DEBUG_ITEM" />
+                <action android:name="com.logan.spellmini.DEBUG_POLL" />
             </intent-filter>
         </receiver>
     </application>

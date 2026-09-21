@@ -13,6 +13,7 @@ import com.logan.spellmini.data.MsgRole
 import com.logan.spellmini.data.Settings
 import com.logan.spellmini.net.OpenRouter
 import com.logan.spellmini.pipeline.Pipeline
+import com.logan.spellmini.sources.Subscriptions
 import com.logan.spellmini.tasks.TaskRunner
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -52,6 +53,8 @@ object Graph {
         private set
     lateinit var loops: LoopAgent
         private set
+    lateinit var sources: Subscriptions
+        private set
 
     /** Something another app just handed over; the chat screen picks it up and puts it next to the composer. */
     val pendingShare = MutableStateFlow<com.logan.spellmini.share.Shared?>(null)
@@ -87,6 +90,7 @@ object Graph {
             afterJudged = { profile.maybeAutoRun(); loops.maybeRun() }
             onHandled = chat::markHandled
         }
+        sources = Subscriptions(db, settings, pipeline)
         pipeline.recoverOnStart()
         // Profile-driven feed. A plain loop is enough: the notification listener keeps this process alive, and a
         // missed tick (deep sleep) simply runs on the next wake-up.
@@ -94,6 +98,15 @@ object Graph {
             delay(STARTUP_GRACE_MS)
             while (true) {
                 feed.refreshIfDue()
+                delay(SCHEDULER_TICK_MS)
+            }
+        }
+        // Subscribed sources, on the same kind of loop but apart from it: a slow feed must not hold up the patrol.
+        scope.launch {
+            runCatching { sources.seedPresets() }
+            delay(STARTUP_GRACE_MS)
+            while (true) {
+                runCatching { sources.pollDue() }
                 delay(SCHEDULER_TICK_MS)
             }
         }

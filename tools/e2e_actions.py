@@ -584,12 +584,123 @@ def case_open_loop():
     record("该来没来·记下等下文的事", bool(mine) and mine[0]["nextAt"] > time.time() * 1000, f"记下={[(t['title'], t['instruction'][:30]) for t in new]}", [])
 
 
+# ---------------------------------------------------------------- subscribed sources
+
+def sources_in_store():
+    out = []
+    for r in db("select id, text from memory where source='订阅'"):
+        try: out.append({"id": r["id"], **json.loads(r["text"])})
+        except ValueError: pass
+    return out
+
+
+def item(source, title, text, link):
+    """An item of a subscribed source, through the same entry the poller uses."""
+    adb("shell", "input", "keyevent", "KEYCODE_HOME"); time.sleep(1)
+    broadcast("DEBUG_ITEM", source=source, title=title, text=text, link=link)
+
+
+def case_sources_seeded():
+    """A fresh install, and an upgrade, both end up with the presets; the noisy ones start off."""
+    found = sources_in_store()
+    on = [s["name"] for s in found if s.get("enabled")]
+    off = [s["name"] for s in found if not s.get("enabled")]
+    record("订阅·预置源", len(found) >= 6 and any("AIHOT" in n for n in on) and any("arXiv" in n for n in off), f"开着={on} 关着={off}", [])
+
+
+def case_item_routes():
+    """Three items, three fates: of interest -> a card that links to the item; off-profile -> ignored; the same news reworded -> no second card."""
+    n = random.randint(100, 999)
+    maker, bench = random.choice([("智谱", "AgentBench"), ("月之暗面", "τ-bench"), ("阶跃星辰", "BFCL"), ("面壁智能", "ToolSandbox")])
+    ev = db("select coalesce(max(id),0) m from events")[0]["m"]
+    good_title = f"{maker}开源手机端 Agent 评测集 M{n}，覆盖 {n} 个真实 App 任务"
+    good_link = f"https://example.com/agent-eval-{n}"
+    item("测试源", good_title, f"{maker}发布面向手机端 Agent 的评测集 M{n}，包含 {n} 个跨 App 真实任务，给出了任务完成率与步数两个指标，并在 {bench} 上对比了主流模型的工具调用稳定性。数据与评测脚本已开源。", good_link)
+    good = wait_event(ev, good_title)
+    card = db(f"select title, sourceLabel, sourcesJson from feed where eventId=(select id from events where title='{good_title}' order by id desc limit 1)")
+    linked = bool(card) and good_link in card[0]["sourcesJson"] and card[0]["sourceLabel"].startswith("订阅 · ")
+
+    junk_title = f"某交易所上线 {n} 倍杠杆新币，注册即送空投"
+    item("测试源", junk_title, "限时活动：注册并完成首笔交易即可领取空投奖励，邀请好友再得返佣，名额有限先到先得。", f"https://example.com/promo-{n}")
+    junk = wait_event(ev, junk_title)
+
+    again_title = f"手机端 Agent 新评测集 M{n} 开源：{n} 个 App 任务，{maker}出品"
+    item("另一个测试源", again_title, f"{maker}今天开源了手机端 Agent 评测集 M{n}，共 {n} 个真实 App 任务，指标是完成率和步数，并对比了主流模型的工具调用表现。", f"https://example.org/news/{n}")
+    again = wait_event(ev, again_title)
+    second = db(f"select count(*) c from feed where eventId=(select id from events where title='{again_title}' order by id desc limit 1)")[0]["c"]
+
+    ok = bool(good) and good["outcome"] == "FEED_CARD" and linked and bool(junk) and junk["finalRoute"] == "ignore" and bool(again) and second == 0
+    record("订阅·分流：成卡 / 忽略 / 重复不出第二张", ok,
+           f"相关={good and (good['finalRoute'], good['outcome'])} 带原文链接={linked} 无关={junk and junk['finalRoute']} "
+           f"重复={again and (again['finalRoute'], again['outcome'], (again['outcomeNote'] or '')[:40])} 第二张卡={second}", [])
+
+
+def case_item_touches_work():
+    """An item that changes something he is working on may become a message; silence still ends as a card, never as nothing."""
+    n = random.randint(3, 9)
+    base = db("select coalesce(max(id),0) m from messages")[0]["m"]
+    ev = db("select coalesce(max(id),0) m from events")[0]["m"]
+    # The profile says he is choosing between these three on price and tool-call stability. The subject changes from run
+    # to run: told about one of them an hour ago, the assistant rightly stays silent about the same story again.
+    vendor, model = random.choice([("DeepSeek", f"V{n}.{random.randint(1, 9)}"), ("Anthropic", f"Claude Haiku {n}.{random.randint(1, 9)}"), ("OpenAI", f"GPT-{n}.{random.randint(1, 9)} mini")])
+    change, detail = random.choice([
+        (f"API 价格下调 {random.choice([40, 50, 60])}%", "输入输出价格同步下调，新价格即日生效，老版本价格不变。"),
+        ("工具调用改为严格模式，旧的调用格式下月停用", "多轮工具调用必须使用新的严格 schema，旧格式 30 天后返回错误，官方给出了迁移说明。"),
+        (f"上下文扩到 {random.choice([1, 2, 4])}M 且不加价", "长上下文不再单独计费，官方称多轮工具调用的成功率明显提高，并已上架 OpenRouter。"),
+    ])
+    title = f"{vendor} 发布 {model}：{change}"
+    link = f"https://example.com/{vendor.lower()}-{n}-{random.randint(1000, 9999)}"
+    item("测试源", title, f"{vendor} 今天发布 {model}。{detail}适合对成本敏感的手机端 Agent 场景。", link)
+    got = wait_event(ev, title, timeout=260)
+    rows = db(ROWS.format(base))
+    links = [l.get("url") for r in rows for l in payload(r).get("links", [])]
+    spoke = bool(got) and got["outcome"] == "CHAT_SENT"
+    carded = bool(got) and got["outcome"] == "FEED_CARD"
+    no_button = not any(r["kind"] == "text" and "查看原消息" in (r["text"] or "") for r in rows)
+    ok = (spoke and link in links) or carded
+    record("订阅·碰到手头的事", ok and no_button, f"结果={got and (got['finalRoute'], got['outcome'])} 消息带原文链接={link in links} 说了={said(rows)[:70]}", rows)
+
+
+def case_subscribe_in_chat():
+    """"订阅……" in chat adds a source after reading it once, leaves an undoable note, and the first look happens right away."""
+    before = {s["id"] for s in sources_in_store()}
+    base = db("select coalesce(max(id),0) m from messages")[0]["m"]
+    repo = random.choice(["vllm-project/vllm", "ollama/ollama", "huggingface/transformers", "langchain-ai/langchain"])
+    send(f"订阅 GitHub 上 {repo} 的新版本发布，放进我的订阅源里")
+    rows = wait_quiet(base)
+    new = [s for s in sources_in_store() if s["id"] not in before]
+    noted = notes_for(rows, "source")
+    time.sleep(25)
+    polled = [s for s in sources_in_store() if s["id"] in {x["id"] for x in new} and s.get("lastPolledAt", 0) > 0 and not s.get("lastError")]
+    ok = bool(new) and "releases.atom" in new[0]["url"] and bool(noted) and bool(polled)
+    record("订阅·聊天里订阅", ok, f"新源={[(s['name'], s['url'][:60]) for s in new]} 记录={len(noted)} 已看第一眼={bool(polled)}（交给分流 {polled and polled[0].get('taken')} 条）", rows)
+    for s in new: send(f"取消订阅 #{s['id']}"); wait_quiet(db("select coalesce(max(id),0) m from messages")[0]["m"] - 1, timeout=60)
+
+
+def case_poll_live():
+    """The real presets answer, and a first look takes a taste rather than the backlog."""
+    ev = db("select coalesce(max(id),0) m from events")[0]["m"]
+    broadcast("DEBUG_POLL")
+    end = time.time() + 150
+    while time.time() < end:
+        time.sleep(8)
+        live = [s for s in sources_in_store() if s.get("enabled")]
+        if live and all(s.get("lastPolledAt", 0) > 0 for s in live): break
+    live = [s for s in sources_in_store() if s.get("enabled")]
+    failed = [(s["name"], s.get("lastError", "")[:40]) for s in live if s.get("lastError")]
+    taken = db(f"select pkg, count(*) c from events where id>{ev} and pkg like 'feed.%' and pkg != 'feed.debug' group by pkg")
+    flood = [t for t in taken if t["c"] > 40]
+    record("订阅·真实源能读", bool(live) and len(failed) <= 1 and not flood, f"读了 {len(live)} 个，失败={failed} 各源交给分流={[(t['pkg'], t['c']) for t in taken]}", [])
+
+
 SPECIAL = [
     ("提醒 + 撤销", case_reminder_and_undo), ("关注主题", case_follow), ("通知·有截止时间", case_trigger_deadline),
     ("通知·工作群被 @", case_trigger_mention), ("通知·后台动作变按钮", case_trigger_button), ("反馈·别再提这类", case_feedback_rule),
     ("通知·拟好回复一键发出", case_reply), ("通知·你已经点开了", case_already_opened),
     ("只问不做", case_lookup_only), ("定期任务 + 撤销", case_recurring_task), ("盯着·订阅源", case_watch_feed), ("分享进来的文字", case_share_text),
     ("该来没来·记下等下文的事", case_open_loop), ("交办一件活·成品", case_job), ("定时任务到点执行", case_scheduled_task),
+    ("订阅·预置源", case_sources_seeded), ("订阅·分流", case_item_routes), ("订阅·碰到手头的事", case_item_touches_work),
+    ("订阅·聊天里订阅", case_subscribe_in_chat), ("订阅·真实源能读", case_poll_live),
 ]
 
 wanted = sys.argv[1:]

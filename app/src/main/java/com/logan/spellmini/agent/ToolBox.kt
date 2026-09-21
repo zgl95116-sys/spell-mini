@@ -72,7 +72,47 @@ internal class ToolBox(private val context: Context, private val db: AppDb) {
             ToolOutcome(if (tasks.isEmpty()) "「在办」里现在是空的。" else tasks.joinToString("\n") { describe(it) })
         }
         ChatTools.UPDATE_TASK -> updateTask(args)
+        ChatTools.SUBSCRIBE -> {
+            setActivity("在找订阅源")
+            subscribe(args)
+        }
+        ChatTools.UNSUBSCRIBE -> {
+            val source = Graph.sources.find(args.str("source").orEmpty())
+            if (source == null) ToolOutcome("error: 没找到这个订阅源；先调用 list_sources 看看现在有什么") else {
+                Graph.sources.remove(source.id)
+                ToolOutcome("done: 已取消订阅「${source.name}」。", acted = true)
+            }
+        }
+        ChatTools.LIST_SOURCES -> {
+            val all = Graph.sources.store.all()
+            ToolOutcome(if (all.isEmpty()) "现在没有订阅任何信息源。" else all.joinToString("\n") { source ->
+                val state = when {
+                    !source.enabled -> "已关闭"
+                    source.lastError.isNotBlank() -> "上次读取失败：${source.lastError.take(40)}"
+                    source.lastPolledAt == 0L -> "还没检查过"
+                    else -> "上次检查 ${stamp.format(Date(source.lastPolledAt))}，累计交给分流 ${source.taken} 条"
+                }
+                "#${source.id}｜${source.name}｜每 ${source.everyMin} 分钟｜$state"
+            })
+        }
         else -> null
+    }
+
+    private suspend fun subscribe(args: JsonObject): ToolOutcome {
+        val url = args.str("url").orEmpty().trim().ifBlank { return ToolOutcome("error: url is required: the feed address or the site's home page") }
+        val before = Graph.sources.store.all().map { it.id }.toSet()
+        val source = Graph.sources.subscribe(url, args.str("name")).getOrElse { return ToolOutcome("error: ${it.message?.take(160)}") }
+        if (source.id in before) return ToolOutcome("already_done: 「${source.name}」已经在订阅里了（#${source.id}）。", acted = true)
+        db.messages().insert(
+            ChatMsg(
+                role = MsgRole.ASSISTANT, kind = MsgKind.NOTE, createdAt = System.currentTimeMillis(), text = "已订阅：${source.name}",
+                cardJson = buildJsonObject { put("tool", SOURCE_NOTE); putJsonObject("args") { put("sourceId", source.id) } }.toString(),
+                cardState = CardState.DONE,
+            )
+        )
+        // The first look happens right away, so "订阅了" is followed by something to see rather than an hour of nothing.
+        Graph.scope.launch { runCatching { Graph.sources.pollNow() } }
+        return ToolOutcome("done: 已订阅「${source.name}」（${source.url}），每 ${source.everyMin} 分钟看一次；现在先看第一眼，最新的几条会过一遍分流，合适的进 Feed。他可以在 Feed 顶上或聊天里这条记录旁边取消。用一句话如实告诉他。", acted = true)
     }
 
     private fun describe(task: Task): String {
@@ -162,5 +202,8 @@ internal class ToolBox(private val context: Context, private val db: AppDb) {
     companion object {
         /** Marks the note left when something was added to 在办; undoing it deletes the task. */
         const val TASK_NOTE = "task"
+
+        /** Marks the note left when a source was subscribed to; undoing it removes the source. */
+        const val SOURCE_NOTE = "source"
     }
 }

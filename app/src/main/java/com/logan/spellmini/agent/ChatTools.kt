@@ -39,6 +39,9 @@ internal object ChatTools {
     const val LIST_TASKS = "list_tasks"
     const val UPDATE_TASK = "update_task"
     const val START_JOB = "start_job"
+    const val SUBSCRIBE = "subscribe_source"
+    const val UNSUBSCRIBE = "unsubscribe_source"
+    const val LIST_SOURCES = "list_sources"
 
     private class Param(val type: String, val description: String, val options: List<String>? = null)
 
@@ -119,6 +122,19 @@ internal object ChatTools {
             UPDATE_TASK, "暂停、恢复、删除「在办」里的一项，或者现在就跑一次。", listOf("id", "action"),
             mapOf("id" to Param("integer", "list_tasks 里的编号"), "action" to Param("string", "做什么", listOf("pause", "resume", "delete", "run_now"))),
         ),
+    )
+
+    private val sources = listOf(
+        tool(
+            SUBSCRIBE,
+            "订阅一个信息源（RSS 或 Atom）：以后它的每条更新都会像通知一样过一遍分流，和用户有关的进 Feed，直接影响他手头的事才在聊天里说。" +
+                "用户说「订阅……」「以后……有更新告诉我/放进 Feed」时用。url 填订阅地址，或者网站首页（会自动找它的订阅源）；只知道名字就先 web_search 找到官网。" +
+                "GitHub 项目的新版本是 https://github.com/<owner>/<repo>/releases.atom。微博、B 站、知乎、公众号没有订阅源，如实告诉他订不了。" +
+                "和 watch 的区别：watch 是盯一件具体的事等一个结果；订阅是长期看一个源的全部更新。",
+            listOf("url"), mapOf("url" to Param("string", "订阅源地址或网站首页，https 开头"), "name" to Param("string", "显示用的短名字，可省略")),
+        ),
+        tool(UNSUBSCRIBE, "取消订阅一个信息源。", listOf("source"), mapOf("source" to Param("string", "list_sources 里的编号或名字"))),
+        tool(LIST_SOURCES, "列出现在订阅的信息源、各自多久检查一次、上次检查的情况。用户问「我订阅了什么」或要取消某个之前先调用。", emptyList(), emptyMap()),
     )
 
     private val readPage = tool(
@@ -248,6 +264,9 @@ internal object ChatTools {
         Actions.CAMERA, "打开相机。", emptyList(), mapOf("mode" to Param("string", "photo 拍照（默认）或 video 录像", listOf("photo", "video"))),
     )
 
+    /** For turns that may only read: searching the web and opening a page. */
+    fun lookupOnly(): JsonArray = buildJsonArray { add(search); add(readPage) }
+
     /**
      * A conversation gets everything. In the background the list is shorter on purpose: nobody asked for anything, so
      * only tools that fit "here is what I noticed, and one tap if you want it" are offered.
@@ -256,7 +275,7 @@ internal object ChatTools {
         add(search); add(readPage); add(remember); add(reminder(mode)); add(schedule)
         when (mode) {
             TurnMode.USER -> {
-                add(startJob); add(watch); tasks.forEach { add(it) }
+                add(startJob); add(watch); tasks.forEach { add(it) }; sources.forEach { add(it) }
                 add(fetchFeed); add(searchHistory); add(calendarAgenda)
                 add(draftReply(mode)); add(unhandled)
                 feedControl.forEach { add(it) }

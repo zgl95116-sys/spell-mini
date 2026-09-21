@@ -85,6 +85,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import com.logan.spellmini.data.MsgKind
 import com.logan.spellmini.data.MsgRole
+import com.logan.spellmini.sources.Subscriptions
 
 @Composable
 fun ChatScreen(pendingContext: String?, pendingImage: String? = null, onContextConsumed: () -> Unit) {
@@ -172,7 +173,9 @@ private fun MessageRow(message: ChatMsg, liveText: String?) {
                 }
                 attachments?.docId?.let { docId -> DocCard(attachments.docTitle.orEmpty()) { Graph.openDoc.value = docId } }
                 if (!attachments?.links.isNullOrEmpty()) LinkRow(attachments!!.links)
-                if (fromNotification || !attachments?.actions.isNullOrEmpty()) ChipColumn(message, attachments?.actions.orEmpty(), fromNotification)
+                // A message about a subscribed item carries the item's link card instead of a notification to jump back to.
+                val hasOriginal = fromNotification && !Subscriptions.isItemLabel(message.sourceLabel)
+                if (hasOriginal || !attachments?.actions.isNullOrEmpty()) ChipColumn(message, attachments?.actions.orEmpty(), hasOriginal)
                 if (fromNotification) FeedbackRow(message, attachments)
             }
         }
@@ -226,7 +229,7 @@ private fun ActionNote(message: ChatMsg) {
     val undone = message.cardState == CardState.UNDONE
     // A timed item can be taken back until it fires; a rule learnt from feedback or a standing task, at any time.
     val canUndo = message.cardState == CardState.DONE &&
-        ((tool in Actions.undoable && (due ?: 0) > System.currentTimeMillis()) || tool == ChatAgent.RULE_NOTE || tool == TASK_NOTE)
+        ((tool in Actions.undoable && (due ?: 0) > System.currentTimeMillis()) || tool == ChatAgent.RULE_NOTE || tool == TASK_NOTE || tool == SOURCE_NOTE)
     val running = tool == JobAgent.JOB_NOTE && message.cardState == JobAgent.RUNNING
     Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
         val mark = when {
@@ -294,6 +297,7 @@ private fun LinkCard(link: LinkPreview, onClick: () -> Unit) {
 
 private const val MIN_LINK_IMAGE_PX = 200
 private const val TASK_NOTE = "task"
+private const val SOURCE_NOTE = "source"
 
 /** One-tap actions under a message. The label comes from the exact arguments that will run, not from the model's prose. */
 @Composable

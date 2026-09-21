@@ -45,6 +45,38 @@ data class Criteria(
                 "decide the correct route.",
         )
 
+        /**
+         * Added to the routing question for an item from a subscribed feed. Nobody is addressing the user there, so the
+         * bar for interrupting him is what the item changes for him, not that it is interesting.
+         */
+        const val SUBSCRIPTION_INSTRUCTIONS = " This one is not a notification: new_notification.kind is \"subscription\", a new " +
+            "item from a feed the user subscribed to. Nobody is addressing him, and he will see it in his feed anyway, so " +
+            "chat is rare here. Choose chat only when he would have to act or change a decision because of it: a product " +
+            "he is choosing between right now changed its price, terms or availability; something he is waiting for " +
+            "happened; a plan of his is affected. News that is merely relevant to his field, his job or his interests " +
+            "is feed, however relevant: new papers, benchmarks, tools, launches, opinions, rankings. Choose ignore for " +
+            "generic, promotional, minor or repeated items, and for items resembling taste.dismissed more than taste.liked."
+
+        const val REPEAT_INSTRUCTIONS = "Does new_notification report the same piece of news as any entry of recent_cards, " +
+            "the feed cards this user already has and the items he was already told about? A further development, a different product or a clearly different " +
+            "angle on the same subject is not the same piece of news."
+
+        /**
+         * How close an item of a subscribed source is to this user. On a real AI news feed the routing question alone
+         * let 25 of 30 items through as "matches his interests"; a feed that mirrors its source filters nothing. The
+         * levels are concrete situations because JEV judges each level on its own.
+         */
+        const val FIT_INSTRUCTIONS = "How close is new_notification to what this particular user works on and follows, " +
+            "going by user_profile and by taste (liked and dismissed feed cards)?"
+        val FIT_LEVELS = listOf(
+            "Unrelated to the work, topics and interests in user_profile, or an advertisement or promotion",
+            "General news from a field he follows, such as funding, lawsuits, politics, personnel changes, opinion pieces " +
+                "or rankings, that does not touch a topic, product, model, tool or method user_profile names",
+            "Directly about a topic, product, model, tool or method that user_profile names as his work or his interest; " +
+                "he would likely open it and read it",
+            "Directly about what user_profile says he is working on or deciding right now; he could use it in that work this week",
+        )
+
         const val URGENCY_INSTRUCTIONS = "How soon does the user need to know about this notification?"
         val URGENCY_LEVELS = listOf(
             "No need for the user to know",
@@ -197,6 +229,30 @@ class Settings(context: Context) {
         val next = (listOf(line.take(120)) + recentMedia.filter { it != line }).take(20)
         prefs.edit().putString("recentMedia", next.joinToString("\n")).apply()
     }
+
+    /** Feeds and public lists the user subscribed to are polled and their items triaged like notifications. */
+    var subscriptionsEnabled: Boolean
+        get() = prefs.getBoolean("subscriptionsEnabled", true)
+        set(value) = edit { putBoolean("subscriptionsEnabled", value) }
+
+    /** Cards a day from subscriptions, counted apart from notification cards so neither can starve the other. */
+    var subscriptionPerDayCap: Int
+        get() = prefs.getInt("subscriptionPerDayCap", 30)
+        set(value) = edit { putInt("subscriptionPerDayCap", value.coerceIn(0, 300)) }
+
+    /**
+     * An item of a subscribed source becomes a card only when JEV scores its closeness to the user at least this high,
+     * in tenths on a 0 to 3 scale. Chosen from the distribution on a real feed, like the alert threshold was: of 50 items
+     * of an AI news feed, 1.5 let 39 through and 2.0 let 24 through, and 2 is the level "a topic he named himself".
+     */
+    var subscriptionFitTenths: Int
+        get() = prefs.getInt("subscriptionFitTenths", 20)
+        set(value) = edit { putInt("subscriptionFitTenths", value.coerceIn(0, 30)) }
+
+    /** Preset sources this install has already been offered, by address. One the user removed is not added again. */
+    var offeredPresets: Set<String>
+        get() = prefs.getStringSet("offeredPresets", emptySet()).orEmpty().toSet()
+        set(value) = edit { putStringSet("offeredPresets", value) }
 
     var lastTimezone: String
         get() = prefs.getString("lastTimezone", "").orEmpty()

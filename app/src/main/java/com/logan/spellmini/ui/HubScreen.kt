@@ -56,6 +56,7 @@ import com.logan.spellmini.data.Handled
 import com.logan.spellmini.data.NotifEvent
 import com.logan.spellmini.data.Outcome
 import com.logan.spellmini.data.Route
+import com.logan.spellmini.sources.Subscriptions
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -97,11 +98,13 @@ fun HubScreen(onBack: () -> Unit) {
     }
 }
 
-private val traceFilters = listOf("全部", Route.CHAT, Route.FEED, Route.IGNORE, "二判", "已过滤", "出错")
+private val traceFilters = listOf("全部", Route.CHAT, Route.FEED, Route.IGNORE, "订阅", "二判", "已过滤", "出错")
 
 private fun NotifEvent.matches(filter: String): Boolean = when (filter) {
     "全部" -> true
-    "二判" -> secondJudgeNote != null
+    "订阅" -> Subscriptions.isItem(this)
+    // On an item of a subscribed source that field holds JEV's closeness score, not a second opinion.
+    "二判" -> secondJudgeNote != null && !Subscriptions.isItem(this)
     "已过滤" -> status == EventStatus.FILTERED || status == EventStatus.APP_OFF
     "出错" -> status == EventStatus.ERROR || outcome == Outcome.ERROR
     else -> status != EventStatus.FILTERED && status != EventStatus.APP_OFF && (finalRoute ?: route) == filter
@@ -151,7 +154,8 @@ private fun TodaySummary(events: List<NotifEvent>) {
         Calendar.getInstance().apply { set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0) }.timeInMillis
     }
     val today = events.filter { it.postedAt >= startOfDay }
-    val received = today.count { it.status != EventStatus.INTEREST && it.status != EventStatus.TASK }
+    val items = today.count { Subscriptions.isItem(it) }
+    val received = today.count { it.status != EventStatus.INTEREST && it.status != EventStatus.TASK && !Subscriptions.isItem(it) }
     val patrols = today.count { it.status == EventStatus.INTEREST }
     val judged = today.filter { it.status == EventStatus.JUDGED }
     val latencies = judged.mapNotNull { it.jevLatencyMs }.sorted()
@@ -162,7 +166,8 @@ private fun TodaySummary(events: List<NotifEvent>) {
     val cards = today.count { it.outcome == Outcome.FEED_CARD }
     Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp)) {
         Text(
-            "今天收到 $received 条通知，送 JEV 判断 ${judged.size} 条" + if (patrols > 0) "；兴趣巡查 $patrols 个选题" else "",
+            "今天收到 $received 条通知，送 JEV 判断 ${judged.count { !Subscriptions.isItem(it) }} 条" +
+                (if (items > 0) "；订阅源 $items 条" else "") + if (patrols > 0) "；兴趣巡查 $patrols 个选题" else "",
             color = Ink.Black, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
         )
         Spacer(Modifier.height(4.dp))
@@ -201,7 +206,7 @@ private fun EventRow(event: NotifEvent, onClick: () -> Unit) {
     val (label, color) = event.verdictLabel()
     Column(Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 16.dp, vertical = 10.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(event.appName + if (event.synthetic) " · 模拟" else "", color = Ink.Muted, fontSize = 12.sp, maxLines = 1)
+            Text(event.appName + if (event.synthetic && !Subscriptions.isItem(event)) " · 模拟" else "", color = Ink.Muted, fontSize = 12.sp, maxLines = 1)
             Spacer(Modifier.width(8.dp))
             Text(formatClock(event.postedAt), color = Ink.Faint, fontSize = 12.sp)
             Spacer(Modifier.weight(1f))
@@ -288,7 +293,7 @@ private fun EventDetail(event: NotifEvent, onDismiss: () -> Unit) {
                     event.category?.let { "通知类别 $it" },
                     "包名 ${event.pkg}",
                 ).forEach { Text(it, color = Ink.Muted, fontSize = 12.sp, fontFamily = FontFamily.Monospace) }
-                event.secondJudgeNote?.let { Text("二判：$it → ${event.finalRoute}", color = Ink.Amber, fontSize = 13.sp) }
+                event.secondJudgeNote?.let { Text((if (Subscriptions.isItem(event)) "订阅判断：" else "二判：") + "$it → ${event.finalRoute}", color = Ink.Amber, fontSize = 13.sp) }
                 outcomeLine(event)?.let { Text(it, color = Ink.Body, fontSize = 13.sp) }
                 handled?.let {
                     val minutes = ((it.postedAt - event.postedAt) / 60_000).coerceAtLeast(0)
@@ -380,7 +385,7 @@ private suspend fun exportEverything(context: Context) {
             })
             put("profile", buildJsonObject {
                 put("user_written", settings.userProfile)
-                put("learned", kotlinx.serialization.json.JsonArray(Graph.db.memory().list().map {
+                put("learned", kotlinx.serialization.json.JsonArray(Graph.db.memory().list().filter { it.source != com.logan.spellmini.data.MemorySource.SOURCE }.map {
                     buildJsonObject { put("id", it.id); put("text", it.text); put("source", it.source); put("updated_at", it.updatedAt) }
                 }))
                 put("log", kotlinx.serialization.json.JsonArray(Graph.db.memory().allLogs().map {
@@ -404,6 +409,14 @@ private suspend fun exportEverything(context: Context) {
                     put("liked", it.liked); put("dismissed", it.dismissed)
                 }
             }))
+            // Addresses go out without their query string: that is where a personal token would sit.
+            put("sources", kotlinx.serialization.json.JsonArray(Graph.sources.store.all().map {
+                buildJsonObject {
+                    put("id", it.id); put("name", it.name); put("kind", it.kind); put("url", it.url.substringBefore('?')); put("enabled", it.enabled)
+                    put("preset", it.preset); put("every_min", it.everyMin); put("last_polled_at", it.lastPolledAt); put("last_error", it.lastError); put("taken", it.taken)
+                }
+            }))
+            put("subscription_fit_threshold", settings.subscriptionFitTenths / 10.0)
             put("apps", kotlinx.serialization.json.JsonArray(Graph.db.appRules().list().map {
                 buildJsonObject { put("package", it.pkg); put("name", it.appName); put("enabled", it.enabled); put("count", it.count) }
             }))

@@ -11,7 +11,13 @@ import java.nio.charset.Charset
 import java.util.concurrent.TimeUnit
 
 data class PageText(val title: String, val text: String, val url: String)
-data class FeedItem(val id: String, val title: String, val link: String, val date: String, val summary: String)
+data class FeedItem(
+    val id: String, val title: String, val link: String, val date: String, val summary: String,
+    val category: String = "", val author: String = "",
+)
+
+/** A feed as a whole: what it calls itself, and its items. */
+data class Feed(val title: String, val items: List<FeedItem>)
 
 /**
  * Plain reading of the open web for the research and watch tools: a page as text, a feed as items. No JavaScript is
@@ -38,14 +44,14 @@ object Web {
         return fixed
     }
 
-    private suspend fun fetch(url: String): Triple<ByteArray, String?, String> = withContext(Dispatchers.IO) {
+    private suspend fun fetch(url: String, maxBytes: Long = MAX_BYTES): Triple<ByteArray, String?, String> = withContext(Dispatchers.IO) {
         val request = Request.Builder().url(safe(url)).header("User-Agent", AGENT).header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.6").build()
         http.newCall(request).execute().use { response ->
             if (!response.isSuccessful) throw IOException("HTTP ${response.code}")
             val body = response.body ?: throw IOException("空响应")
             val source = body.source()
-            source.request(MAX_BYTES)
-            val bytes = source.buffer.clone().readByteArray(minOf(source.buffer.size, MAX_BYTES))
+            source.request(maxBytes)
+            val bytes = source.buffer.clone().readByteArray(minOf(source.buffer.size, maxBytes))
             Triple(bytes, body.contentType()?.charset()?.name(), response.request.url.toString())
         }
     }
@@ -91,8 +97,19 @@ object Web {
         return PageText(title, text, finalUrl)
     }
 
+    /** A response body as text, for public JSON endpoints read as if they were feeds. Returns the text and the final address. */
+    suspend fun readText(url: String, maxBytes: Long = MAX_BYTES): Pair<String, String> {
+        val (bytes, charset, finalUrl) = fetch(url, maxBytes)
+        return decode(bytes, charset) to finalUrl
+    }
+
+    /** The raw page, for finding the feed a site advertises in its head. */
+    suspend fun readHtml(url: String): Pair<String, String> = readText(url)
+
+    suspend fun readFeed(url: String): List<FeedItem> = readFeedFull(url).items
+
     /** RSS 2.0 and Atom, newest first as the feed gives them. GitHub releases (`/releases.atom`) and arXiv are Atom. */
-    suspend fun readFeed(url: String): List<FeedItem> {
+    suspend fun readFeedFull(url: String, limit: Int = 30): Feed {
         val (bytes, charset, _) = fetch(url)
         val xml = decode(bytes, charset).trimStart('﻿', ' ', '\n', '\r')
         val parser = Xml.newPullParser().apply {
@@ -101,12 +118,16 @@ object Web {
         }
         val items = mutableListOf<FeedItem>()
         var fields: MutableMap<String, String>? = null
+        var channelTitle = ""
         var event = parser.eventType
-        while (event != XmlPullParser.END_DOCUMENT && items.size < 30) {
+        while (event != XmlPullParser.END_DOCUMENT && items.size < limit) {
             val name = parser.name?.lowercase()
             when (event) {
                 XmlPullParser.START_TAG -> when {
                     name == "item" || name == "entry" -> fields = mutableMapOf()
+                    // The first title outside any item is the feed's own name.
+                    fields == null && name == "title" && channelTitle.isEmpty() && items.isEmpty() ->
+                        channelTitle = runCatching { parser.nextText() }.getOrNull()?.let { plain(it).trim().take(60) }.orEmpty()
                     fields != null && name == "link" && parser.getAttributeValue(null, "href") != null -> {
                         // Atom: the first link, or the one marked as the page itself.
                         val rel = parser.getAttributeValue(null, "rel")
@@ -124,6 +145,8 @@ object Web {
                         title = plain(f["title"].orEmpty()).trim().take(160), link = link,
                         date = (f["pubdate"] ?: f["updated"] ?: f["published"] ?: f["dc:date"]).orEmpty().take(40),
                         summary = plain(f["description"] ?: f["summary"] ?: f["content"] ?: f["content:encoded"] ?: "").replace(Regex("\\s+"), " ").trim().take(280),
+                        category = plain(f["category"].orEmpty()).trim().take(24),
+                        author = plain(f["author"] ?: f["dc:creator"] ?: "").trim().take(60),
                     )
                     fields = null
                 }
@@ -132,6 +155,6 @@ object Web {
             event = try { parser.next() } catch (broken: Exception) { XmlPullParser.END_DOCUMENT }
         }
         if (items.isEmpty()) throw IOException("这个地址不是 RSS 或 Atom 订阅源，或者里面没有条目")
-        return items
+        return Feed(channelTitle, items)
     }
 }

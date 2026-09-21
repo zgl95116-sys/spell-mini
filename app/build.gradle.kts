@@ -23,11 +23,14 @@ android {
         applicationId = "com.logan.spellmini"
         minSdk = 26
         targetSdk = 34
-        versionCode = 9
-        versionName = "0.8"
+        versionCode = 10
+        versionName = "0.9"
         // Comma-separated packages whose notifications start switched off (the per-app switch turns them back on).
         // Meant for other assistant apps on the same phone; which ones is local knowledge, so it lives in local.properties.
         buildConfigField("String", "QUIET_PACKAGES", "\"${secret("QUIET_PACKAGES")}\"")
+        // Extra preset feeds as `name|url` pairs separated by `;`. A feed address can carry a personal token and this
+        // repository is public, so such addresses live in local.properties too.
+        buildConfigField("String", "EXTRA_FEEDS", "\"${secret("EXTRA_FEEDS")}\"")
     }
 
     buildTypes {

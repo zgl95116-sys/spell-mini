@@ -27,13 +27,16 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import android.widget.Toast
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.OpenInNew
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.outlined.ChatBubbleOutline
 import androidx.compose.material.icons.outlined.FavoriteBorder
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -61,8 +64,10 @@ import com.logan.spellmini.actions.Actions
 import com.logan.spellmini.agent.FeedAgent
 import com.logan.spellmini.agent.JobAgent
 import com.logan.spellmini.data.FeedCard
+import com.logan.spellmini.data.FeedSource
 import com.logan.spellmini.data.MemorySource
 import com.logan.spellmini.net.str
+import com.logan.spellmini.sources.Subscriptions
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -95,6 +100,7 @@ fun FeedScreen(onDiscuss: (String) -> Unit) {
     Column(Modifier.fillMaxSize().background(Ink.Bubble)) {
         RefreshHeader()
         FollowRow()
+        SourceRow()
         if (cards.isEmpty()) {
             Box(Modifier.fillMaxSize().padding(36.dp), contentAlignment = Alignment.Center) {
                 Text(
@@ -164,6 +170,83 @@ private fun FollowRow() {
     }
 }
 
+/**
+ * Feeds and public lists whose every update is triaged like a notification. Tap a name to switch it on or off; the
+ * cross removes one the user added himself. New ones come from here or from the chat ("订阅……").
+ */
+@Composable
+private fun SourceRow() {
+    val entries by Graph.db.memory().watchBySource(MemorySource.SOURCE).collectAsState(initial = emptyList())
+    val sources = remember(entries) { entries.mapNotNull(FeedSource::parse).sortedWith(compareBy({ !it.enabled }, { it.createdAt })) }
+    val polling by Graph.sources.polling.collectAsState()
+    val scope = rememberCoroutineScope()
+    val context = LocalContext.current
+    var adding by remember { mutableStateOf(false) }
+    Row(
+        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(start = 20.dp, end = 16.dp, bottom = 6.dp),
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Text(if (polling) "订阅 · 检查中" else "订阅", color = Ink.Muted, fontSize = 12.sp)
+        sources.forEach { source ->
+            Row(
+                Modifier.clip(RoundedCornerShape(50)).background(if (source.enabled) Color.White else Color.Transparent)
+                    .border(1.dp, if (source.enabled) Color.Transparent else Ink.Line, RoundedCornerShape(50))
+                    .clickable { scope.launch { Graph.sources.setEnabled(source.id, !source.enabled) } }
+                    .padding(start = 10.dp, end = if (source.preset) 10.dp else 6.dp, top = 4.dp, bottom = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    source.name + if (source.enabled && source.lastError.isNotBlank()) " ⚠" else "",
+                    color = if (source.enabled) Ink.Black else Ink.Faint, fontSize = 12.sp, maxLines = 1,
+                )
+                if (!source.preset) Icon(
+                    Icons.Filled.Close, contentDescription = "取消订阅 ${source.name}", tint = Ink.Muted,
+                    modifier = Modifier.padding(start = 4.dp).size(14.dp).clickable { scope.launch { Graph.sources.remove(source.id) } },
+                )
+            }
+        }
+        Icon(
+            Icons.Filled.Add, contentDescription = "添加订阅源", tint = Ink.Black,
+            modifier = Modifier.clip(CircleShape).background(Color.White).clickable { adding = true }.padding(4.dp).size(16.dp),
+        )
+    }
+    if (adding) {
+        var address by remember { mutableStateOf("") }
+        var working by remember { mutableStateOf(false) }
+        var problem by remember { mutableStateOf<String?>(null) }
+        AlertDialog(
+            onDismissRequest = { if (!working) adding = false },
+            title = { Text("添加订阅源", fontSize = 17.sp, fontWeight = FontWeight.SemiBold) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("填 RSS 或 Atom 地址，或者网站首页（会自动找它的订阅源）。它的每条更新都会过一遍分流：和你有关的进 Feed，直接影响你手头的事才在聊天里说。", color = Ink.Body, fontSize = 13.sp, lineHeight = 19.sp)
+                    OutlinedTextField(value = address, onValueChange = { address = it; problem = null }, singleLine = true, placeholder = { Text("https://", color = Ink.Faint) }, modifier = Modifier.fillMaxWidth())
+                    problem?.let { Text(it, color = Ink.Red, fontSize = 12.sp, lineHeight = 17.sp) }
+                }
+            },
+            confirmButton = {
+                Pill(if (working) "在找…" else "订阅", Ink.Black, filled = true) {
+                    if (working || address.isBlank()) return@Pill
+                    working = true
+                    scope.launch {
+                        Graph.sources.subscribe(address).fold(
+                            onSuccess = { source ->
+                                adding = false
+                                Toast.makeText(context, "已订阅「${source.name}」，先看第一眼", Toast.LENGTH_SHORT).show()
+                                runCatching { Graph.sources.pollNow() }
+                            },
+                            onFailure = { problem = it.message?.take(120) ?: "没订阅成" },
+                        )
+                        working = false
+                    }
+                }
+            },
+            dismissButton = { Pill("取消", Ink.Muted) { if (!working) adding = false } },
+            containerColor = Color.White,
+        )
+    }
+}
+
 /** Full-width cover. Site thumbnails are often tiny (120x75); upscaled they look broken, so anything that small is dropped. */
 @Composable
 private fun Cover(url: String) {
@@ -191,7 +274,8 @@ private fun FeedCardView(card: FeedCard, onDiscuss: () -> Unit) {
     val images = remember(card.imagesJson) { strings(card.imagesJson) }
     val sources = remember(card.sourcesJson) { links(card.sourcesJson) }
     // Interest-patrol cards have no notification behind them, so there is nothing to jump back to.
-    val fromNotification = card.eventId != null && !FeedAgent.isPatrolLabel(card.sourceLabel)
+    val fromSubscription = Subscriptions.isItemLabel(card.sourceLabel)
+    val fromNotification = card.eventId != null && !fromSubscription && !FeedAgent.isPatrolLabel(card.sourceLabel)
     // A finished piece of work keeps its Markdown in `body`; the list shows its conclusion and a way in.
     val isDoc = card.sourceLabel.startsWith(JobAgent.DOC_LABEL)
     val long = card.body.length > LONG_BODY
@@ -254,6 +338,15 @@ private fun FeedCardView(card: FeedCard, onDiscuss: () -> Unit) {
                 )
                 Spacer(Modifier.width(26.dp))
                 Icon(Icons.Outlined.ChatBubbleOutline, contentDescription = "讨论", tint = Ink.Black, modifier = Modifier.size(21.dp).clickable(onClick = onDiscuss))
+                if (fromSubscription && sources.isNotEmpty()) {
+                    Spacer(Modifier.width(26.dp))
+                    Icon(
+                        Icons.AutoMirrored.Outlined.OpenInNew, contentDescription = "阅读原文", tint = Ink.Black,
+                        modifier = Modifier.size(21.dp).clickable {
+                            runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(sources.first().second)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
+                        },
+                    )
+                }
                 if (fromNotification) {
                     Spacer(Modifier.width(26.dp))
                     Icon(

@@ -32,6 +32,16 @@ class DebugReceiver : BroadcastReceiver() {
                         .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
                 )
             }
+            // An item of a subscribed source without waiting for a real feed to publish one: same entry the poller uses.
+            ACTION_ITEM -> Graph.scope.launch {
+                val source = intent.getStringExtra("source").orEmpty().ifBlank { "测试源" }
+                val link = intent.getStringExtra("link").orEmpty().ifBlank { "https://example.com/" + System.nanoTime() }
+                Graph.pipeline.ingestItem(
+                    pkg = com.logan.spellmini.sources.Subscriptions.PKG_PREFIX + "debug", appName = com.logan.spellmini.sources.Subscriptions.LABEL + source,
+                    key = com.logan.spellmini.sources.Subscriptions.keyFor(0, link), title = intent.getStringExtra("title").orEmpty(), text = text, category = null,
+                )
+            }
+            ACTION_POLL -> Graph.scope.launch { Log.i("SpellDebug", "poll: " + runCatching { Graph.sources.pollNow() }.getOrElse { it.message }) }
             ACTION_LOOPS -> Graph.scope.launch { runCatching { Graph.loops.runNow() }.onFailure { Log.w("SpellDebug", "loop pass failed", it) } }
             ACTION_NOTIFY -> Graph.pipeline.simulate(
                 intent.getStringExtra("app").orEmpty().ifBlank { "模拟" }, intent.getStringExtra("title").orEmpty(), text,
@@ -46,5 +56,7 @@ class DebugReceiver : BroadcastReceiver() {
         const val ACTION_PROFILE = "com.logan.spellmini.DEBUG_PROFILE"
         const val ACTION_LOOPS = "com.logan.spellmini.DEBUG_LOOPS"
         const val ACTION_SHARE_IMAGE = "com.logan.spellmini.DEBUG_SHARE_IMAGE"
+        const val ACTION_ITEM = "com.logan.spellmini.DEBUG_ITEM"
+        const val ACTION_POLL = "com.logan.spellmini.DEBUG_POLL"
     }
 }

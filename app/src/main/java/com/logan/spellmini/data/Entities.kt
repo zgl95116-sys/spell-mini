@@ -130,8 +130,11 @@ object MemorySource {
     /** A [Task] (recurring job, watch, open loop) kept as JSON. Never shown as a fact and never sent with the profile. */
     const val TASK = "任务"
 
+    /** A [FeedSource] (an RSS feed or a public list the user subscribed to) kept as JSON. Bookkeeping, like [TASK]. */
+    const val SOURCE = "订阅"
+
     /** Sources that are instructions or bookkeeping rather than facts about the user. */
-    val NOT_FACTS = setOf(FOLLOW, RULE, TASK)
+    val NOT_FACTS = setOf(FOLLOW, RULE, TASK, SOURCE)
 }
 
 @Entity(tableName = "messages", indices = [Index("createdAt")])
