@@ -1,11 +1,14 @@
 package com.logan.spellmini.sources
 
+import android.content.Context
 import android.util.Log
 import com.logan.spellmini.data.AppDb
 import com.logan.spellmini.data.FeedSource
 import com.logan.spellmini.data.NotifEvent
 import com.logan.spellmini.data.Presets
+import com.logan.spellmini.data.Secrets
 import com.logan.spellmini.data.Settings
+import com.logan.spellmini.data.SourceConfig
 import com.logan.spellmini.data.SourceKind
 import com.logan.spellmini.data.SourceStore
 import com.logan.spellmini.net.FeedItem
@@ -14,6 +17,7 @@ import com.logan.spellmini.net.arr
 import com.logan.spellmini.net.obj
 import com.logan.spellmini.net.str
 import com.logan.spellmini.pipeline.Pipeline
+import com.logan.spellmini.signals.SignalCatalog
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -22,6 +26,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.longOrNull
+import java.io.File
 import java.io.IOException
 import java.text.SimpleDateFormat
 import java.util.Calendar
@@ -34,8 +39,10 @@ import java.util.Locale
  * affordable is JEV: reading every item of a busy feed costs about a hundredth of a cent each, so nothing has to be
  * pre-filtered by keyword and the judgment is the same one that reads his notifications.
  */
-class Subscriptions(private val db: AppDb, private val settings: Settings, private val pipeline: Pipeline) {
+class Subscriptions(private val context: Context, private val db: AppDb, private val settings: Settings, private val pipeline: Pipeline) {
     val store = SourceStore(db.memory())
+    val secrets = Secrets(context)
+    private val files = File(context.filesDir, "sources")
     private val pollLock = Mutex()
 
     /** True while a round of polling runs; the feed header shows it. */
@@ -89,10 +96,15 @@ class Subscriptions(private val db: AppDb, private val settings: Settings, priva
      * taste of the newest few: a feed's backlog is not news, but an empty result right after subscribing looks broken.
      */
     private suspend fun poll(source: FeedSource): Int {
-        val items = when (source.kind) {
-            SourceKind.OPENROUTER_MODELS -> models(source.url)
-            else -> Web.readFeedFull(source.url, MAX_ITEMS).items
+        if (source.kind in SourceKind.PUSHED) return 0 // kept open by the push hub, not polled
+        if (Adapters.asleep(source, Calendar.getInstance().get(Calendar.HOUR_OF_DAY))) {
+            store.get(source.id)?.let { store.save(it.copy(lastPolledAt = System.currentTimeMillis())) }
+            return 0
         }
+        val secret = secrets.get(Secrets.forSource(source.id))
+        if (source.kind == SourceKind.IMAP) return mailbox(source, secret)
+        val reading = read(source, secret)
+        val items = reading.items
         val now = System.currentTimeMillis()
         val byTime = source.kind == SourceKind.OPENROUTER_MODELS
         val first = if (byTime) source.mark == 0L else source.seen.isEmpty()
@@ -105,17 +117,12 @@ class Subscriptions(private val db: AppDb, private val settings: Settings, priva
             unseen.filter { item -> parseDate(item.date)?.let { now - it < STALE_MS } ?: true }.take(MAX_PER_ROUND)
         }
         // Oldest first, so the trace and the feed read in the order things happened.
-        fresh.reversed().forEach { item ->
-            pipeline.ingestItem(
-                pkg = pkgFor(source), appName = LABEL + source.name, key = keyFor(source.id, item.link),
-                title = item.title, text = describe(item), category = item.category.ifBlank { null },
-            )
-        }
+        fresh.reversed().forEach { item -> hand(source, item) }
         // Everything in this round counts as seen, including what the first round skipped as backlog.
         store.get(source.id)?.let { current ->
             store.save(
                 current.copy(
-                    lastPolledAt = now, lastError = "", taken = current.taken + fresh.size,
+                    lastPolledAt = now, lastError = "", taken = current.taken + fresh.size, config = current.config + reading.config,
                     seen = if (byTime) emptyList() else (current.seen + unseen.map { it.id }).distinct(),
                     mark = if (byTime) maxOf(current.mark, items.maxOfOrNull { parseDate(it.date) ?: 0L } ?: 0L) else current.mark,
                 )
@@ -124,17 +131,81 @@ class Subscriptions(private val db: AppDb, private val settings: Settings, priva
         return fresh.size
     }
 
+    /** The closeness an item of this source needs to become a card, when the source sets its own; null for the default. */
+    suspend fun barFor(event: NotifEvent): Double? {
+        val id = event.pkg.removePrefix(PKG_PREFIX).removePrefix(OWN_PICK).toLongOrNull() ?: return null
+        return store.get(id)?.config?.get(SourceConfig.FIT)?.toDoubleOrNull()
+    }
+
+    /** One look at a polled source, whatever its kind. */
+    private suspend fun read(source: FeedSource, secret: String?): Reading = when (source.kind) {
+        SourceKind.OPENROUTER_MODELS -> Reading(models(source))
+        SourceKind.JSON -> Adapters.json(source, secret)
+        SourceKind.PAGE -> Adapters.page(source, secret, files)
+        SourceKind.ICS -> Adapters.ics(source, secret)
+        else -> Reading(Web.readFeedFull(source.url, MAX_ITEMS).items)
+    }
+
+    /** Published to the world: judged as something he might want to read. Addressed to him: judged as a notification. */
+    private suspend fun hand(source: FeedSource, item: FeedItem) {
+        if (source.addressed) pipeline.ingestPush(source.name, item.id, item.title, describe(item))
+        else pipeline.ingestItem(
+            pkg = pkgFor(source), appName = LABEL + source.name, key = keyFor(source.id, item.link.ifBlank { item.id }),
+            title = item.title, text = describe(item), category = item.category.ifBlank { null },
+        )
+    }
+
+    private suspend fun mailbox(source: FeedSource, secret: String?): Int {
+        val user = source.config[SourceConfig.USER].orEmpty()
+        if (user.isBlank() || secret.isNullOrBlank()) throw IOException("还没填邮箱地址或授权码")
+        val (mails, highest) = ImapReader.newMail(source.url, user, secret, afterUid = source.mark)
+        mails.forEach { mail -> pipeline.ingestPush(source.name, "mail-${mail.uid}", mail.from.ifBlank { "邮件" }, "《${mail.subject}》\n${mail.text}".take(1_500)) }
+        store.get(source.id)?.let { store.save(it.copy(lastPolledAt = System.currentTimeMillis(), lastError = "", mark = highest, taken = it.taken + mails.size)) }
+        return mails.size
+    }
+
+    /**
+     * What a source would deliver right now, without keeping anything: the "测试" button. A number source answers with
+     * its current reading so the path can be checked even when no rule fires.
+     */
+    suspend fun preview(source: FeedSource, secret: String?): List<String> = when {
+        source.kind in SourceKind.PUSHED -> listOf("推送式的流保存后才会连接；连上没有，看这一行下面的状态。")
+        source.kind == SourceKind.IMAP -> ImapReader.newMail(source.url, source.config[SourceConfig.USER].orEmpty(), secret.orEmpty(), afterUid = 0).first.map { "${it.from}｜${it.subject}｜${it.text.replace('\n', ' ').take(60)}" }.ifEmpty { listOf("登录成功，收件箱里没有读到邮件。") }
+        !source.config[SourceConfig.VALUE].isNullOrBlank() -> {
+            val reading = Adapters.json(source.copy(config = source.config - SourceConfig.LAST - SourceConfig.SIDE), secret)
+            listOf("现在的读数：${reading.config[SourceConfig.LAST] ?: "（读到了，但规则里没有 change / above / below）"}") + reading.items.map { "会发出：${it.title}" }
+        }
+        source.kind == SourceKind.PAGE -> listOf("读到了正文 ${Web.readPage(source.url, Adapters.headers(source, secret), ownNetwork = true).text.length} 个字。第一次只记下现状，之后出现新内容才算一条。")
+        else -> read(source, secret).items.take(4).map { "${it.title}｜${it.summary.take(60)}" }.ifEmpty { listOf("读通了，但现在没有条目。") }
+    }
+
+    /** Adds a source the user configured by hand, after one successful look at it. */
+    suspend fun add(source: FeedSource, secret: String?): Result<FeedSource> = runCatching {
+        if (store.all().size >= MAX_SOURCES) throw IOException("订阅源已经有 $MAX_SOURCES 个，到上限了，先删掉几个")
+        if (source.kind !in SourceKind.PUSHED) preview(source, secret)
+        val saved = store.add(source.copy(name = source.name.trim().take(24).ifBlank { host(source.url) }))
+        if (!secret.isNullOrBlank()) secrets.put(Secrets.forSource(saved.id), secret)
+        saved
+    }
+
     private fun describe(item: FeedItem): String {
         val published = parseDate(item.date)?.let { "发布于 " + SimpleDateFormat("M月d日 HH:mm", Locale.CHINA).format(Date(it)) }
         val tail = listOfNotNull(published, item.author.takeIf { it.isNotBlank() }?.let { "作者 $it" }).joinToString(" · ")
         return listOf(item.summary, tail.takeIf { it.isNotBlank() }?.let { "（$it）" }).filterNotNull().filter { it.isNotBlank() }.joinToString("\n")
     }
 
-    /** OpenRouter's model list, newest first, shaped like feed items. */
-    private suspend fun models(url: String): List<FeedItem> {
+    /**
+     * OpenRouter's model list, newest first, shaped like feed items. The same response also shows what changed about the
+     * models that were already there: a new price, a longer context, a withdrawal. Those go straight to triage, apart from
+     * the high-water mark that tells new models from old ones.
+     */
+    private suspend fun models(source: FeedSource): List<FeedItem> {
+        val url = source.url
         val (body, _) = Web.readText(url, MODELS_MAX_BYTES)
         val data = (runCatching { Json.parseToJsonElement(body) as? JsonObject }.getOrNull() ?: throw IOException("模型列表不是预期的 JSON")).arr("data")
             ?: throw IOException("模型列表里没有 data")
+        val watchChanges = SignalCatalog.find(SignalCatalog.MODEL_CHANGES)?.let { settings.signalOn(it.id, it.defaultOn) } == true
+        if (watchChanges) runCatching { modelChanges(data.mapNotNull { it as? JsonObject }).forEach { hand(source, it) } }.onFailure { Log.w(TAG, "model changes not read", it) }
         return data.mapNotNull { it as? JsonObject }.mapNotNull { model ->
             val id = model.str("id") ?: return@mapNotNull null
             val created = (model["created"] as? JsonPrimitive)?.longOrNull ?: 0L
@@ -152,6 +223,32 @@ class Subscriptions(private val db: AppDb, private val settings: Settings, priva
                 category = "模型",
             ) to created
         }.sortedByDescending { it.second }.map { it.first }
+    }
+
+    /** Compares the list with the copy kept from the last look. The copy lives in a file: a few hundred models are no business of the database. */
+    private fun modelChanges(models: List<JsonObject>): List<FeedItem> {
+        fun perMillion(text: String?) = text?.toDoubleOrNull()?.let { "$" + "%.2f".format(it * 1_000_000) } ?: "?"
+        val current = models.mapNotNull { model ->
+            val id = model.str("id") ?: return@mapNotNull null
+            val pricing = model.obj("pricing")
+            id to listOf(model.str("name") ?: id, perMillion(pricing?.str("prompt")), perMillion(pricing?.str("completion")), (model["context_length"] as? JsonPrimitive)?.contentOrNull ?: "?")
+        }.toMap()
+        val file = File(files.apply { mkdirs() }, "openrouter-models.tsv")
+        val before = if (file.exists()) file.readLines().mapNotNull { line -> line.split('\t').takeIf { it.size == 5 }?.let { it[0] to it.drop(1) } }.toMap() else null
+        file.writeText(current.entries.joinToString("\n") { (id, fields) -> (listOf(id) + fields).joinToString("\t") { it.replace('\t', ' ') } })
+        if (before == null) return emptyList()
+        val stamp = System.currentTimeMillis() / 3_600_000
+        val changed = current.mapNotNull { (id, now) ->
+            val old = before[id] ?: return@mapNotNull null
+            val parts = listOfNotNull(
+                "输入价 ${old[1]} → ${now[1]}".takeIf { old[1] != now[1] }, "输出价 ${old[2]} → ${now[2]}".takeIf { old[2] != now[2] },
+                "上下文 ${old[3]} → ${now[3]} token".takeIf { old[3] != now[3] },
+            )
+            if (parts.isEmpty()) null else FeedItem(id = "chg:$id:$stamp", title = "OpenRouter 改了：${now[0]}", link = "https://openrouter.ai/$id", date = "", summary = parts.joinToString("；") + "（价格按每百万 token）", category = "模型")
+        }
+        val gone = before.filterKeys { it !in current }.map { (id, old) -> FeedItem(id = "gone:$id", title = "OpenRouter 下架了：${old[0]}", link = "https://openrouter.ai/$id", date = "", summary = "这个模型不在列表里了；下架前输入价 ${old[1]}、输出价 ${old[2]}（每百万 token）。", category = "模型") }
+        // A reshuffled catalogue is not news: past a handful, something on their side changed wholesale.
+        return (changed + gone).take(MAX_CHANGES)
     }
 
     // ------------------------------------------------------------------ managing the list
@@ -206,7 +303,7 @@ class Subscriptions(private val db: AppDb, private val settings: Settings, priva
     /** Presets are switched off rather than deleted; what the user added himself goes for good. */
     suspend fun remove(id: Long) {
         val source = store.get(id) ?: return
-        if (source.preset) store.save(source.copy(enabled = false)) else store.delete(id)
+        if (source.preset) store.save(source.copy(enabled = false)) else { store.delete(id); secrets.remove(Secrets.forSource(id)); File(files, "page-$id.txt").delete() }
     }
 
     suspend fun find(nameOrId: String): FeedSource? {
@@ -234,6 +331,7 @@ class Subscriptions(private val db: AppDb, private val settings: Settings, priva
         private const val STALE_MS = 14 * 24 * 3_600_000L
         private const val MAX_DISCOVERY = 6
         private const val MODELS_MAX_BYTES = 6_000_000L
+        private const val MAX_CHANGES = 6
 
         private val FEED_LINK = Regex("""(?is)<link\b[^>]*type\s*=\s*["']application/(?:rss|atom)\+xml["'][^>]*>""")
         private val HREF = Regex("""(?i)href\s*=\s*["']([^"']+)["']""")

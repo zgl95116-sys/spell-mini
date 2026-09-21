@@ -13,6 +13,8 @@ import com.logan.spellmini.data.MsgRole
 import com.logan.spellmini.data.Settings
 import com.logan.spellmini.net.OpenRouter
 import com.logan.spellmini.pipeline.Pipeline
+import com.logan.spellmini.signals.DeviceMoments
+import com.logan.spellmini.signals.NowContext
 import com.logan.spellmini.sources.Subscriptions
 import com.logan.spellmini.tasks.TaskRunner
 import kotlinx.coroutines.CoroutineScope
@@ -55,6 +57,12 @@ object Graph {
         private set
     lateinit var sources: Subscriptions
         private set
+    lateinit var pushes: com.logan.spellmini.sources.PushHub
+        private set
+    lateinit var now: NowContext
+        private set
+    lateinit var moments: DeviceMoments
+        private set
 
     /** Something another app just handed over; the chat screen picks it up and puts it next to the composer. */
     val pendingShare = MutableStateFlow<com.logan.spellmini.share.Shared?>(null)
@@ -83,14 +91,20 @@ object Graph {
         jobs = JobAgent(application, db, settings, api, scope, ::profileText)
         loops = LoopAgent(db, settings, api)
         if (settings.lastTimezone.isBlank()) settings.lastTimezone = java.util.TimeZone.getDefault().id
-        pipeline = Pipeline(db, settings, api, scope, ::profileText).apply {
+        now = NowContext(application, db, settings)
+        pipeline = Pipeline(db, settings, api, scope, ::profileText, now).apply {
             onChat = chat::onTrigger
             onFeed = feed::generate
             onSecondJudge = chat::secondJudge
             afterJudged = { profile.maybeAutoRun(); loops.maybeRun() }
             onHandled = chat::markHandled
+            momentEvidence = { event -> com.logan.spellmini.signals.SignalCatalog.momentId(event)?.let { com.logan.spellmini.signals.MomentPlaybook(application, db).evidence(it, event) } }
         }
-        sources = Subscriptions(db, settings, pipeline)
+        sources = Subscriptions(application, db, settings, pipeline)
+        pipeline.itemBar = { event -> sources.barFor(event) }
+        pushes = com.logan.spellmini.sources.PushHub(sources.store, sources.secrets, pipeline, scope)
+        moments = DeviceMoments(application, db, settings, pipeline, scope) { path -> chat.describeImage(path) }
+        moments.attach()
         pipeline.recoverOnStart()
         // Profile-driven feed. A plain loop is enough: the notification listener keeps this process alive, and a
         // missed tick (deep sleep) simply runs on the next wake-up.
@@ -106,7 +120,9 @@ object Graph {
             runCatching { sources.seedPresets() }
             delay(STARTUP_GRACE_MS)
             while (true) {
+                runCatching { pushes.sync() }
                 runCatching { sources.pollDue() }
+                runCatching { moments.tick() }
                 delay(SCHEDULER_TICK_MS)
             }
         }

@@ -77,6 +77,45 @@ data class Criteria(
             "Directly about what user_profile says he is working on or deciding right now; he could use it in that work this week",
         )
 
+        /**
+         * How JEV is told to use the phone-side context. It rides along with every request; the routing criteria above
+         * stay the user's to edit.
+         */
+        const val CONTEXT_INSTRUCTIONS = " right_now describes what the user is doing at this moment (activities in " +
+            "progress, calendar, ringer, screen, place) and sender describes how much this conversation has mattered to " +
+            "him so far. Use sender when judging personal relevance. right_now never changes whether something is " +
+            "relevant; it is for the interrupt question."
+
+        const val INTERRUPT_INSTRUCTIONS = "Given right_now, should the assistant interrupt the user about " +
+            "new_notification at this very moment, or deliver it quietly so he finds it when he next picks up his phone?"
+        const val INTERRUPT_NOW = "now"
+        const val INTERRUPT_LATER = "later"
+        val INTERRUPT_CRITERIA = mapOf(
+            INTERRUPT_NOW to "He is reachable and nothing in right_now argues against a sound or a banner; or the matter " +
+                "cannot wait (money being taken, safety, someone waiting for him right now, a change to something starting " +
+                "within the hour), whatever he is doing; or the sender is someone he answers within minutes.",
+            INTERRUPT_LATER to "right_now shows he is occupied or has asked for quiet (in a meeting or a call, driving " +
+                "or navigating, sharing his screen, asleep, ringer silenced or do-not-disturb on, already interrupted " +
+                "many times today) and the matter can wait an hour without loss.",
+        )
+
+        /**
+         * The routing question for a moment: something that happened on the phone itself, not a message from anyone. It has
+         * criteria of its own. Judged by the notification criteria, "he hung up a call" is a routine status message and
+         * was ignored every time, even with the caller's text message from that morning in the evidence.
+         */
+        const val MOMENT_INSTRUCTIONS = "new_notification is not a notification but a moment: something that just happened on " +
+            "the user's own phone (his alarm went off, he hung up a call, he arrived somewhere, a meeting is about to start, " +
+            "he took a screenshot). moment_context lists what his assistant would have to work with at this point. Could the " +
+            "assistant offer him something concrete right now?"
+        val MOMENT_CRITERIA = mapOf(
+            Route.CHAT to "Yes: moment_context is not empty (a notification related to this moment, things waiting for him, " +
+                "events on his calendar, tasks due, new cards), or the moment itself carries something to act on (an address, " +
+                "a date, a code, a plan that user_profile mentions).",
+            Route.IGNORE to "No: moment_context is empty or all zeros and the moment carries nothing to act on, so the " +
+                "assistant could only state what he already knows.",
+        )
+
         const val URGENCY_INSTRUCTIONS = "How soon does the user need to know about this notification?"
         val URGENCY_LEVELS = listOf(
             "No need for the user to know",
@@ -253,6 +292,51 @@ class Settings(context: Context) {
     var offeredPresets: Set<String>
         get() = prefs.getStringSet("offeredPresets", emptySet()).orEmpty().toSet()
         set(value) = edit { putStringSet("offeredPresets", value) }
+
+    // ------------------------------------------------------------------ signals (see signals/SignalCatalog)
+
+    /** Whether a context source is switched on. The default comes from the catalog, so a new signal needs no migration. */
+    fun signalOn(id: String, default: Boolean): Boolean = prefs.getBoolean("sig_$id", default)
+    fun setSignal(id: String, on: Boolean) = edit { putBoolean("sig_$id", on) }
+
+    /** Wi‑Fi names the user marked as home and as work, one per line; a place is a Wi‑Fi because that works indoors. */
+    var homeWifi: String
+        get() = prefs.getString("homeWifi", "").orEmpty()
+        set(value) = edit { putString("homeWifi", value) }
+
+    var workWifi: String
+        get() = prefs.getString("workWifi", "").orEmpty()
+        set(value) = edit { putString("workWifi", value) }
+
+    /** The city whose weather is compared with the user's plans: a name for display, coordinates for the forecast. */
+    var cityName: String
+        get() = prefs.getString("cityName", "").orEmpty()
+        set(value) = edit { putString("cityName", value) }
+
+    var cityLat: Double
+        get() = java.lang.Double.longBitsToDouble(prefs.getLong("cityLat", java.lang.Double.doubleToLongBits(0.0)))
+        set(value) = edit { putLong("cityLat", java.lang.Double.doubleToLongBits(value)) }
+
+    var cityLon: Double
+        get() = java.lang.Double.longBitsToDouble(prefs.getLong("cityLon", java.lang.Double.doubleToLongBits(0.0)))
+        set(value) = edit { putLong("cityLon", java.lang.Double.doubleToLongBits(value)) }
+
+    /**
+     * Address of an RSSHub instance of the user's own. Chinese platforms publish no feeds and the public instance turns
+     * anonymous requests away, so the routes for them only work against an instance he runs or pays for.
+     */
+    var rsshubBase: String
+        get() = prefs.getString("rsshubBase", "").orEmpty()
+        set(value) = edit { putString("rsshubBase", value.trim().removeSuffix("/")) }
+
+    /** How long before a meeting the pre-meeting moment fires. */
+    var meetingLeadMin: Int
+        get() = prefs.getInt("meetingLeadMin", 10)
+        set(value) = edit { putInt("meetingLeadMin", value.coerceIn(3, 30)) }
+
+    var lastWeatherCheckDay: String
+        get() = prefs.getString("lastWeatherCheckDay", "").orEmpty()
+        set(value) = edit { putString("lastWeatherCheckDay", value) }
 
     var lastTimezone: String
         get() = prefs.getString("lastTimezone", "").orEmpty()

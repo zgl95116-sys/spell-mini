@@ -69,7 +69,11 @@ def focus_app():
     # A long run outlasts the screen timeout; a dark screen reads as "nothing on screen" and every tap misses.
     adb("shell", "input", "keyevent", "KEYCODE_WAKEUP"); adb("shell", "wm", "dismiss-keyguard")
     adb("shell", "am", "start", "-n", f"{PKG}/.MainActivity"); time.sleep(2.5)
-    chat = find(ui(), text="Chat")
+    # The app may have been left inside the hub or a finished page (by an earlier case, or by hand): back out to the two tabs.
+    for _ in range(3):
+        chat = find(ui(), text="Chat")
+        if chat: break
+        adb("shell", "input", "keyevent", "KEYCODE_BACK"); time.sleep(1.2)
     if chat: tap(*chat[0])
 
 
@@ -142,7 +146,8 @@ def ensure_default_launcher():
 ensure_default_launcher()
 adb("shell", "svc", "power", "stayon", "true")  # test device only: keep the screen on for the length of the run
 R = random.randint(10, 49)
-ALARM = f"设一个早上5点{R}分的闹钟，备注游泳{R}"
+# Always a couple of hours ahead: run at dawn, "早上 5 点" was already past, and the model reasoned about a missed alarm instead.
+ALARM = f"设一个{(time.localtime().tm_hour + 2) % 24}点{R}分的闹钟，备注游泳{R}"
 FAKE = re.compile(r"\[确认卡|【确认卡|\[系统记录|【系统记录|\[我主动发的|\[NOCLAIM|\[SILENT|\[静默")
 CLAIMS_DONE = re.compile(r"已经?(设|建|加|存|打开|填|复制|开始)[好过上]?了?|(设|建|加|存|填|复制)好了|打开了|备好?了")
 
@@ -693,6 +698,203 @@ def case_poll_live():
     record("订阅·真实源能读", bool(live) and len(failed) <= 1 and not flood, f"读了 {len(live)} 个，失败={failed} 各源交给分流={[(t['pkg'], t['c']) for t in taken]}", [])
 
 
+# ---------------------------------------------------------------- 0.10: context, moments, outside sources of every kind
+
+def grant_for_signals():
+    """The test phone grants what a user would grant from the signals page; on a real phone that is the user's to do."""
+    for p in ("READ_CALENDAR", "ACCESS_FINE_LOCATION", "ACCESS_COARSE_LOCATION", "ACCESS_BACKGROUND_LOCATION", "READ_MEDIA_IMAGES", "POST_NOTIFICATIONS"):
+        adb("shell", "pm", "grant", PKG, f"android.permission.{p}")
+    adb("shell", "appops", "set", PKG, "GET_USAGE_STATS", "allow")
+    broadcast_int("DEBUG_CAP", 80)  # a test hour holds more proactive messages than a day of real use
+
+
+def broadcast_int(action, value):
+    assert "result=0" in adb("shell", f"am broadcast -a {PKG}.{action} -p {PKG} --ei value {value}")
+
+
+def signal(sid, on=True):
+    assert "result=0" in adb("shell", f"am broadcast -a {PKG}.DEBUG_SIGNAL -p {PKG} --es id {sid} --ez on {'true' if on else 'false'}")
+
+
+def forget(sid):
+    """Moments are paced (a cooldown, so many a day); a test must not inherit the pacing of the run before it."""
+    assert "result=0" in adb("shell", f"am broadcast -a {PKG}.DEBUG_FORGET -p {PKG} --es id {sid}"); time.sleep(1)
+
+
+def test_calendar():
+    """A local calendar on the test phone, created once."""
+    found = adb("shell", "content query --uri content://com.android.calendar/calendars --projection _id:account_name")
+    m = re.search(r"_id=(\d+), account_name=spelltest", found)
+    if m: return int(m.group(1))
+    adb("shell", "content insert --uri 'content://com.android.calendar/calendars?caller_is_syncadapter=true&account_name=spelltest&account_type=LOCAL' "
+        "--bind account_name:s:spelltest --bind account_type:s:LOCAL --bind name:s:spelltest --bind calendar_displayName:s:spelltest "
+        "--bind calendar_color:i:255 --bind calendar_access_level:i:700 --bind ownerAccount:s:spelltest --bind visible:i:1 --bind sync_events:i:1")
+    return test_calendar()
+
+
+def add_event(title, start_in_s, length_s=3600):
+    now = int(adb("shell", "date", "+%s").strip())
+    adb("shell", f"content insert --uri content://com.android.calendar/events --bind calendar_id:i:{test_calendar()} --bind title:s:{title} "
+        f"--bind dtstart:l:{(now + start_in_s) * 1000} --bind dtend:l:{(now + start_in_s + length_s) * 1000} --bind eventTimezone:s:Asia/Shanghai")
+
+
+def clear_events():
+    adb("shell", f"content delete --uri content://com.android.calendar/events --where 'calendar_id={test_calendar()}'")
+
+
+def moment_rows(after_id, sid):
+    return db(f"select id, title, finalRoute, routeProbs, jevSource, outcome, outcomeNote from events where id>{after_id} and pkg='signal.{sid}' order by id")
+
+
+def wait_moment(after_id, sid, timeout=200):
+    end = time.time() + timeout
+    while time.time() < end:
+        time.sleep(6)
+        rows = moment_rows(after_id, sid)
+        if rows and rows[-1]["finalRoute"] and rows[-1]["outcome"] not in ("PENDING",) and (rows[-1]["finalRoute"] != "chat" or rows[-1]["outcome"]): return rows
+    return moment_rows(after_id, sid)
+
+
+def case_context_volume():
+    """In a meeting with the phone lying dark, a casual message arrives quietly and an emergency still rings: JEV reads right_now."""
+    clear_events(); add_event(f"季度评审会{R}", -600, 3600); time.sleep(2)
+    adb("shell", "input", "keyevent", "KEYCODE_HOME"); adb("shell", "input", "keyevent", "KEYCODE_SLEEP"); time.sleep(2)
+    ev = db("select coalesce(max(id),0) m from events")[0]["m"]
+    n = random.randint(100, 999)
+    broadcast("DEBUG_NOTIFY", app="微信", title=f"老周{n}", text=random.choice(["周六晚上一起吃个饭？你定地方，不急，有空回我", "下周找个时间打球？哪天都行，你方便了告诉我"]))
+    # Told about one emergency an hour ago, the assistant rightly does not repeat itself about the same one: the matter changes every run.
+    who, where = random.choice(["妈", "爸", "小林", "二叔", "房东王姐"]), random.choice(["朝阳医院急诊", "小区地库", "机场高速出口", "幼儿园门口", "家里厨房"])
+    emergency = random.choice([f"我在{where}把脚崴了走不了路，你现在能过来接我一下吗？看到马上回我电话", f"{where}这边水管爆了，水已经漫到走廊了，物业让业主马上到场，你能立刻过来吗",
+                               f"我手机钱包都落在{where}了，现在借别人手机给你发的，你马上给这个号回个电话", f"{where}有人把咱家车剐了，对方要走，你赶紧下来一趟，带上行驶证"])
+    broadcast("DEBUG_NOTIFY", app="微信", title=f"{who}{n}", text=emergency)
+    calm = wait_event(ev, f"老周{n}"); loud = wait_event(ev, f"{who}{n}")
+    rows = {r["title"]: r for r in db(f"select title, jevSource, outcome, outcomeNote from events where id>{ev}")}
+    adb("shell", "input", "keyevent", "KEYCODE_WAKEUP"); adb("shell", "input", "keyevent", "82"); clear_events()
+    # Whether the casual one is worth a message at all is the route's business; what is tested here is that it never makes a sound.
+    casual = rows.get(f"老周{n}", {})
+    quiet = "later" in (casual.get("jevSource") or "") and (casual.get("outcome") != "CHAT_SENT" or "静默" in (casual.get("outcomeNote") or ""))
+    rang = "now" in (rows.get(f"{who}{n}", {}).get("jevSource") or "") and "弹出" in (rows.get(f"{who}{n}", {}).get("outcomeNote") or "")
+    record("状态·开会时不急的静默送达、要紧的照响", bool(calm) and bool(loud) and quiet and rang,
+           f"闲事={rows.get(f'老周{n}', {}).get('jevSource')}（{(rows.get(f'老周{n}', {}).get('outcomeNote') or '')[:14]}） 急事={rows.get(f'{who}{n}', {}).get('jevSource')}（{(rows.get(f'{who}{n}', {}).get('outcomeNote') or '')[:8]}）", [])
+
+
+def case_moment_call():
+    """A real call on the emulator, hung up after a minute. The caller texted this morning, so the moment is worth a word and the word is about that text."""
+    forget("call_ended")
+    number = f"139{random.randint(10000000, 99999999)}"
+    who, matter, words = random.choice([("物业维修李师傅", "您报修的厨房水管今天下午上门，到之前我给您打电话确认家里有人", ("水管", "物业", "李师傅", "上门")),
+                                         ("顺丰快递员", "您有一个到付件今天派送，到楼下给您打电话，请保持电话畅通", ("顺丰", "快递", "到付", "派送")),
+                                         ("口腔医院导医", "您预约的周四上午洗牙需要电话确认，稍后给您去电", ("口腔", "洗牙", "预约", "医院"))])
+    base = db("select coalesce(max(id),0) m from messages")[0]["m"]
+    broadcast("DEBUG_NOTIFY", app="短信", title=number, text=f"您好，我是{who}，{matter}。")
+    time.sleep(25)
+    ev = db("select coalesce(max(id),0) m from events")[0]["m"]
+    adb("emu", "gsm", "call", number); time.sleep(4); adb("shell", "input", "keyevent", "KEYCODE_CALL"); time.sleep(70)
+    adb("emu", "gsm", "cancel", number)
+    rows = wait_moment(ev, "call_ended", timeout=150)
+    msgs = db(ROWS.format(base))
+    text = said([m for m in msgs if (m["sourceLabel"] or "").startswith("时刻")])
+    ok = bool(rows) and rows[-1]["outcome"] == "CHAT_SENT" and any(w in text for w in words)
+    record("时刻·通话结束，接上他之前发来的事", ok, f"行={[(r['finalRoute'], r['outcome']) for r in rows]} 说了={text[:60]}", msgs)
+
+
+def case_moment_screenshot():
+    """The system's own screenshot key: one moment per screenshot, read by the vision call, and either a button or a reasoned silence."""
+    signal("screenshot"); forget("screenshot")
+    base = db("select coalesce(max(id),0) m from messages")[0]["m"]
+    n = random.randint(10, 28)
+    send(f"帮我记一下：10月{n}日下午三点在国贸三期80层云酷酒吧，{random.choice(['李总', '陈总', '周老师'])}生日会，联系人小陈")
+    wait_quiet(base); focus_app(); time.sleep(2)
+    ev = db("select coalesce(max(id),0) m from events")[0]["m"]
+    adb("shell", "input", "keyevent", "120"); time.sleep(3)
+    rows = wait_moment(ev, "screenshot", timeout=150); time.sleep(8)
+    rows = moment_rows(ev, "screenshot")
+    signal("screenshot", False)
+    ok = len(rows) == 1 and rows[0]["outcome"] in ("CHAT_SENT", "CHAT_SILENT")
+    record("时刻·截图只触发一次并被读懂", ok, f"行={[(r['finalRoute'], r['outcome'], (r['outcomeNote'] or '')[:30]) for r in rows]}", db(ROWS.format(base)))
+
+
+def case_moment_home():
+    """Coming home is the phone joining the home Wi-Fi: mark the emulator's network as home and reconnect."""
+    signal("place"); signal("arrived_home"); forget("arrived_home")
+    assert "result=0" in adb("shell", f"am broadcast -a {PKG}.DEBUG_PLACE -p {PKG} --es home AndroidWifi")
+    ev = db("select coalesce(max(id),0) m from events")[0]["m"]
+    adb("shell", "input", "keyevent", "KEYCODE_HOME"); adb("shell", "svc", "wifi", "disable"); time.sleep(6); adb("shell", "svc", "wifi", "enable")
+    rows = wait_moment(ev, "arrived_home", timeout=120)
+    signal("arrived_home", False)
+    record("时刻·连上家里的 Wi‑Fi 就是到家", bool(rows) and rows[-1]["finalRoute"] in ("chat", "ignore"), f"行={[(r['finalRoute'], r['outcome'], (r['outcomeNote'] or '')[:30]) for r in rows]}", [])
+
+
+def case_moment_meeting():
+    """A calendar event a little over the lead time away: the exact alarm fires the pre-meeting moment, and what it says comes from the notifications about that meeting."""
+    clear_events(); forget("meeting_soon")
+    topic = random.choice(["Ocean评测口径对齐", "手机端Agent选型评审", "Q4评测计划同步"])
+    base = db("select coalesce(max(id),0) m from messages")[0]["m"]
+    who = random.choice(["王磊", "韩梅", "赵强"])
+    broadcast("DEBUG_NOTIFY", app="飞书", title=who, text=f"{topic}那个会之前，你把三个模型的工具调用成功率数据发我一下，我要放进材料里")
+    time.sleep(30)
+    ev = db("select coalesce(max(id),0) m from events")[0]["m"]
+    add_event(topic, 10 * 60 + 50)
+    rows = wait_moment(ev, "meeting_soon", timeout=200)
+    text = said([m for m in db(ROWS.format(base)) if (m["sourceLabel"] or "").startswith("时刻")])
+    clear_events()
+    ok = bool(rows) and rows[-1]["outcome"] == "CHAT_SENT" and who in text
+    record("时刻·会前十分钟，带上和这场会有关的事", ok, f"行={[(r['finalRoute'], r['outcome']) for r in rows]} 说了={text[:70]}", db(ROWS.format(base)))
+
+
+def add_source(template, **extras):
+    parts = [f"am broadcast -a {PKG}.DEBUG_SOURCE -p {PKG} --es template '{template}'"] + [f"--es {k} '{v}'" for k, v in extras.items()]
+    assert "result=0" in adb("shell", " ".join(parts))
+
+
+def case_sources_every_kind():
+    """One source of each kind the form offers: a JSON list, a watched number, a calendar, a push topic and a mailbox (a fake server on this machine)."""
+    before = {s["id"] for s in sources_in_store()}
+    ev = db("select coalesce(max(id),0) m from events")[0]["m"]
+    topic = f"spellmini-e2e-{random.randint(10**11, 10**12)}"
+    server = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "fake_imap.py")])
+    try:
+        add_source("UFC"); add_source("汇率"); add_source("节假日"); add_source("ntfy", url=f"https://ntfy.sh/{topic}", name=f"推送{R}")
+        add_source("邮箱", url="imap://10.0.2.2:1143", name=f"邮箱{R}", user="me@example.com", secret="secret-code")
+        time.sleep(40)
+        subprocess.run(["curl", "-s", "-m", "15", "-H", "Title: 评测任务", "-d", f"judge run {R} 完成：失败 3 格，等你确认是否发布", f"https://ntfy.sh/{topic}"], capture_output=True)
+        broadcast("DEBUG_POLL"); time.sleep(50)
+    finally:
+        server.terminate()
+    new = [s for s in sources_in_store() if s["id"] not in before]
+    by = {s["kind"] + ("#" if s.get("config", {}).get("value") else ""): s for s in new}
+    rows = db(f"select appName, title, text from events where id>{ev} and (pkg like 'feed.u%' or pkg like 'push.%')")
+    mail = [r for r in rows if r["appName"].endswith(f"邮箱{R}")]
+    pushed = [r for r in rows if r["appName"].endswith(f"推送{R}")]
+    decoded = any("CA1831" in r["text"] and "出票成功" in r["text"] for r in mail) and any("信用卡" in r["text"] and r["title"] == "招商银行" for r in mail)
+    leaked = any("secret-code" in json.dumps(s, ensure_ascii=False) for s in new)
+    ok = (by.get("json", {}).get("taken", 0) >= 1 and by.get("json#", {}).get("config", {}).get("last") and by.get("ics", {}).get("taken", 0) >= 1
+          and bool(pushed) and decoded and not leaked and not any(s.get("lastError") for s in new))
+    record("外部·每种接入各一个", bool(ok), f"JSON列表={by.get('json', {}).get('taken')} 盯一个数={by.get('json#', {}).get('config', {}).get('last')} 日历={by.get('ics', {}).get('taken')} "
+           f"推送到达={len(pushed)} 邮件解码={decoded} 密钥进库={leaked} 出错={[(s['name'], s['lastError'][:30]) for s in new if s.get('lastError')]}", [])
+    for s in new: send(f"取消订阅 #{s['id']}"); wait_quiet(db("select coalesce(max(id),0) m from messages")[0]["m"] - 1, timeout=60)
+
+
+def case_signals_page():
+    """The page exists, shows what JEV would be told about this moment, and lists every group."""
+    focus_app(); time.sleep(1)
+    xml = ui()
+    ball = re.findall(r'bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"', xml)
+    tap(979, 200); time.sleep(2.5)
+    tab = find(ui(), text="信号")  # not tap_text: that goes through focus_app, which backs out of the hub
+    if tab: tap(*tab[0])
+    time.sleep(3)
+    wanted_texts = ("JEV 现在看到的你", "此刻的状态", "这个人对你多重要", "时刻", "外面的流", "添加一个源")
+    found = set()
+    for _ in range(36):
+        page = ui()
+        found |= {t for t in wanted_texts if f'text="{t}"' in page}
+        if len(found) == len(wanted_texts): break
+        adb("shell", "input", "swipe", "540", "1800", "540", "700", "250"); time.sleep(0.5)
+    adb("shell", "input", "keyevent", "KEYCODE_BACK")
+    record("信号页·四组和源管理都在", len(found) == len(wanted_texts), f"看到={sorted(found)}", [])
+
+
 SPECIAL = [
     ("提醒 + 撤销", case_reminder_and_undo), ("关注主题", case_follow), ("通知·有截止时间", case_trigger_deadline),
     ("通知·工作群被 @", case_trigger_mention), ("通知·后台动作变按钮", case_trigger_button), ("反馈·别再提这类", case_feedback_rule),
@@ -701,8 +903,11 @@ SPECIAL = [
     ("该来没来·记下等下文的事", case_open_loop), ("交办一件活·成品", case_job), ("定时任务到点执行", case_scheduled_task),
     ("订阅·预置源", case_sources_seeded), ("订阅·分流", case_item_routes), ("订阅·碰到手头的事", case_item_touches_work),
     ("订阅·聊天里订阅", case_subscribe_in_chat), ("订阅·真实源能读", case_poll_live),
+    ("状态·开会时", case_context_volume), ("时刻·通话结束", case_moment_call), ("时刻·截图", case_moment_screenshot), ("时刻·到家", case_moment_home),
+    ("时刻·会前十分钟", case_moment_meeting), ("外部·每种接入", case_sources_every_kind), ("信号页", case_signals_page),
 ]
 
+grant_for_signals()
 wanted = sys.argv[1:]
 def selected(name): return not wanted or any(w in name for w in wanted)
 

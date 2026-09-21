@@ -19,6 +19,8 @@ import com.logan.spellmini.net.obj
 import com.logan.spellmini.net.str
 import com.logan.spellmini.notify.RawNotification
 import com.logan.spellmini.notify.SpellListenerService
+import com.logan.spellmini.signals.NowContext
+import com.logan.spellmini.signals.SignalCatalog
 import com.logan.spellmini.sources.Subscriptions
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -58,6 +60,7 @@ class Pipeline(
     private val api: OpenRouter,
     private val scope: CoroutineScope,
     private val profileText: suspend () -> String,
+    private val now: NowContext,
 ) {
     var onChat: (suspend (NotifEvent) -> Downstream)? = null
     var onFeed: (suspend (NotifEvent) -> Downstream)? = null
@@ -65,6 +68,12 @@ class Pipeline(
     /** Resolves a `review` verdict or a failed JEV call; returns the final route and a short note. */
     var onSecondJudge: (suspend (NotifEvent) -> Pair<String, String>)? = null
     var afterJudged: (suspend () -> Unit)? = null
+
+    /** A source may set how close to him its items must be to become cards (see Subscriptions.barFor). */
+    var itemBar: (suspend (NotifEvent) -> Double?)? = null
+
+    /** What the assistant could draw on at a moment (see signals/MomentPlaybook.evidence), so that JEV judges with the facts. */
+    var momentEvidence: (suspend (NotifEvent) -> JsonObject?)? = null
 
     /** The user dealt with a notification himself; the chat agent marks its message and withdraws our own notification. */
     var onHandled: (suspend (NotifEvent, String) -> Unit)? = null
@@ -155,6 +164,30 @@ class Pipeline(
     }
 
     /**
+     * Something that happened on the phone itself (see signals/DeviceMoments). Judged like a notification, with the
+     * question put differently: could an assistant offer anything at exactly this point?
+     */
+    suspend fun ingestMoment(id: String, signalTitle: String, title: String, text: String) {
+        if (!api.hasKey) return
+        val eventId = db.events().insert(
+            NotifEvent(
+                sbnKey = "signal|$id|${System.currentTimeMillis()}", pkg = SignalCatalog.MOMENT_PKG + id, appName = SignalCatalog.MOMENT_LABEL + signalTitle,
+                title = title.take(120), text = text.take(MAX_ITEM_TEXT), postedAt = System.currentTimeMillis(), synthetic = true, status = EventStatus.QUEUED,
+            )
+        )
+        scope.launch { runCatching { judge(eventId) }.onFailure { Log.e(TAG, "judge failed for moment $eventId", it) } }
+    }
+
+    /** A message another program pushed in (ntfy, GitHub, a mailbox): addressed to him, so an ordinary notification from here on. */
+    fun ingestPush(source: String, key: String, title: String, text: String) = ingest(
+        RawNotification(
+            key = "push|$source|$key", pkg = SignalCatalog.PUSH_PKG + source.hashCode().toUInt(), appName = SignalCatalog.PUSH_LABEL + source,
+            title = title, text = text, category = null, postedAt = System.currentTimeMillis(), ongoing = false, groupSummary = false, synthetic = true,
+        ),
+        null,
+    )
+
+    /**
      * Notifications waiting for their quiet window only live in memory. After a process kill they would sit at
      * "等待中" forever, so on start the recent ones are judged and older ones are marked as lost.
      */
@@ -221,13 +254,28 @@ class Pipeline(
         val id = db.events().insert(
             NotifEvent(
                 sbnKey = raw.key, pkg = raw.pkg, appName = raw.appName, title = raw.title, text = raw.text,
-                category = raw.category, postedAt = raw.postedAt, synthetic = raw.synthetic, status = EventStatus.QUEUED,
+                category = filedAs(raw), postedAt = raw.postedAt, synthetic = raw.synthetic, status = EventStatus.QUEUED,
             )
         )
         keepHandles(id, contentIntent, replyAction)
         val entry = Pending(id, now, LinkedHashSet(linesOf(raw.text)))
         pending[raw.key] = entry
         schedule(raw.key, entry)
+    }
+
+    /**
+     * How the notification was filed, by the app (category, channel, importance) and by the user (a conversation he marked
+     * as priority). An app's own "营销活动" channel is the most honest label a promotion ever carries.
+     */
+    private fun filedAs(raw: RawNotification): String? {
+        val on = SignalCatalog.find(SignalCatalog.CHANNEL)?.let { settings.signalOn(it.id, it.defaultOn) } == true
+        val importance = when (raw.importance) { null -> null; in 4..5 -> "high"; 3 -> "default"; 2 -> "low"; else -> "minimal" }
+        return listOfNotNull(
+            raw.category,
+            raw.channel?.takeIf { on }?.let { "channel=$it" },
+            importance?.takeIf { on }?.let { "importance=$it" },
+            "priority_conversation".takeIf { on && raw.priorityConversation },
+        ).joinToString(" | ").ifBlank { null }
     }
 
     /** Ongoing notifications (music, downloads) update constantly; log each distinct skip at most once per 10 minutes. */
@@ -311,8 +359,9 @@ class Pipeline(
         val eventId = queued.id
         val criteria = settings.criteria
         val item = Subscriptions.isItem(event)
+        val moment = SignalCatalog.isMoment(event)
         val state = buildState(event)
-        val questions = buildQuestions(criteria, item)
+        val questions = buildQuestions(criteria, item, moment)
 
         val verdict = runCatching { jevSlots.withPermit { api.decide(state, questions) } }
         event = verdict.fold(
@@ -324,7 +373,7 @@ class Pipeline(
                     routeProbs = route?.obj("probabilities")?.toString(),
                     confidence = route?.dbl("confidence"),
                     urgency = result.answers.obj("urgency")?.dbl("score"),
-                    jevModel = result.model, jevSource = JEV_SOURCE,
+                    jevModel = result.model, jevSource = JEV_SOURCE + interruptNote(result.answers.obj(INTERRUPT)),
                     jevLatencyMs = result.latencyMs, jevCostUsd = result.costUsd, jevError = null,
                     criteriaVersion = criteria.version,
                 )
@@ -346,7 +395,8 @@ class Pipeline(
         val sameNews = verdict.getOrNull()?.answers?.obj(REPEAT)?.dbl("noul") ?: 0.0
         // "Matches his interests" is true of nearly everything in a feed he chose, so a card also needs closeness.
         val fit = verdict.getOrNull()?.answers?.obj(FIT)?.dbl("score")
-        val bar = if (Subscriptions.isOwnPick(event)) OWN_PICK_FIT else settings.subscriptionFitTenths / 10.0
+        val bar = (if (item) runCatching { itemBar?.invoke(event) }.getOrNull() else null)
+            ?: if (Subscriptions.isOwnPick(event)) OWN_PICK_FIT else settings.subscriptionFitTenths / 10.0
         if (item && fit != null) note = "贴合度 ${"%.1f".format(fit)}/3"
         if (item && sameNews >= SAME_NEWS && finalRoute != Route.IGNORE) {
             finalRoute = Route.IGNORE
@@ -359,7 +409,10 @@ class Pipeline(
         // is not a verdict to drop a notification on; on a real phone this happened about twice a day.
         val chatChance = verdict.getOrNull()?.answers?.obj("route")?.obj("probabilities")?.dbl(Route.CHAT) ?: 0.0
         val closeCall = finalRoute == Route.IGNORE && chatChance >= CLOSE_CALL
-        if (item) {
+        if (moment) {
+            // A moment is either worth a word or it is nothing: there is no card to make of "he hung up a call".
+            if (finalRoute != Route.CHAT) finalRoute = Route.IGNORE
+        } else if (item) {
             // An item nobody sent him is not worth a second opinion from the chat model: unsure means a card at most,
             // and an item that could not be judged at all is let go.
             if (finalRoute == Route.REVIEW) {
@@ -426,7 +479,14 @@ class Pipeline(
         val dismissed = if (item) db.feed().dismissedTitles(TASTE_SIZE) else emptyList()
         // Cards he has, plus items that became a message instead of a card: either way he already knows.
         val recentCards = if (item) (db.feed().recentTitles(RECENT_CARD_TITLES) + db.events().itemTitlesRouted(now - 3 * DAY_MS, event.id, RECENT_CARD_TITLES)).distinct() else emptyList()
+        // What he is doing and how much this sender has mattered: worked out on the phone, because JEV cannot do sums.
+        val rightNow = if (item) null else runCatching { this.now.toJson(this.now.facts()) }.getOrNull()
+        val sender = if (item) null else runCatching { this.now.sender(event) }.getOrNull()
+        val evidence = if (SignalCatalog.isMoment(event)) runCatching { momentEvidence?.invoke(event) }.getOrNull() else null
         return buildJsonObject {
+            rightNow?.let { put("right_now", it) }
+            sender?.let { put("sender", it) }
+            evidence?.let { put("moment_context", it) }
             // JEV is weak at date arithmetic, so every relative time is computed here.
             put("now", SimpleDateFormat(CLOCK_PATTERN, Locale.CHINA).format(Date(now)))
             put("user_profile", profile)
@@ -450,6 +510,7 @@ class Pipeline(
             }
             putJsonObject("new_notification") {
                 if (item) put("kind", "subscription")
+                if (SignalCatalog.isMoment(event)) put("kind", "moment")
                 put("app", event.appName)
                 put("category", event.category ?: "unknown")
                 put("title", event.title)
@@ -460,10 +521,14 @@ class Pipeline(
         }
     }
 
-    private fun buildQuestions(criteria: Criteria, item: Boolean): JsonObject = buildJsonObject {
-        putJsonObject("route") {
+    private fun buildQuestions(criteria: Criteria, item: Boolean, moment: Boolean): JsonObject = buildJsonObject {
+        if (moment) putJsonObject("route") {
             put("type", "choice")
-            put("instructions", Criteria.COMMON + criteria.instructions + if (item) Criteria.SUBSCRIPTION_INSTRUCTIONS else "")
+            put("instructions", Criteria.COMMON + Criteria.MOMENT_INSTRUCTIONS)
+            putJsonObject("criteria") { Criteria.MOMENT_CRITERIA.forEach { (key, value) -> put(key, value) } }
+        } else putJsonObject("route") {
+            put("type", "choice")
+            put("instructions", Criteria.COMMON + criteria.instructions + if (item) Criteria.SUBSCRIPTION_INSTRUCTIONS else Criteria.CONTEXT_INSTRUCTIONS)
             putJsonObject("criteria") {
                 put(Route.CHAT, criteria.chat)
                 put(Route.FEED, criteria.feed)
@@ -476,6 +541,12 @@ class Pipeline(
             put("type", "score")
             put("instructions", Criteria.COMMON + Criteria.URGENCY_INSTRUCTIONS)
             put("criteria", buildJsonArray { Criteria.URGENCY_LEVELS.forEach { add(kotlinx.serialization.json.JsonPrimitive(it)) } })
+        }
+        // Whether to make a sound about it now. Relevance is settled by the route; this only sets the volume.
+        if (!item) putJsonObject(INTERRUPT) {
+            put("type", "choice")
+            put("instructions", Criteria.COMMON + Criteria.INTERRUPT_INSTRUCTIONS)
+            putJsonObject("criteria") { Criteria.INTERRUPT_CRITERIA.forEach { (key, value) -> put(key, value) } }
         }
         if (item) {
             putJsonObject(REPEAT) {
@@ -501,6 +572,18 @@ class Pipeline(
         private const val RETENTION_MS = 14 * DAY_MS
         private const val CLOCK_PATTERN = "yyyy-MM-dd HH:mm EEEE"
         private const val CLOSE_CALL = 0.40
+        private const val INTERRUPT = "interrupt"
+        private const val LATER_MARK = "｜打扰：later"
+
+        /** True when JEV judged that this can be delivered quietly. Kept on the row's jevSource: the schema has no spare column. */
+        fun deliverQuietly(event: NotifEvent): Boolean = event.jevSource?.contains(LATER_MARK) == true
+
+        private fun interruptNote(answer: JsonObject?): String {
+            val choice = answer?.str("choice") ?: return ""
+            val sure = answer.obj("probabilities")?.dbl(choice)?.let { " %.2f".format(it) }.orEmpty()
+            return if (choice == Criteria.INTERRUPT_LATER) "$LATER_MARK$sure" else "｜打扰：now$sure"
+        }
+
         private const val REPEAT = "repeat"
         private const val FIT = "fit"
         private const val SAME_NEWS = 0.80

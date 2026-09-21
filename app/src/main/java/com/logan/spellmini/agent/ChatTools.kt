@@ -264,6 +264,9 @@ internal object ChatTools {
         Actions.CAMERA, "打开相机。", emptyList(), mapOf("mode" to Param("string", "photo 拍照（默认）或 video 录像", listOf("photo", "video"))),
     )
 
+    /** A moment works like a notification in the background, and may also look at what is still open and what is in 在办. */
+    fun forMoment(): JsonArray = buildJsonArray { forMode(TurnMode.TRIGGER).forEach { add(it) }; add(unhandled); add(tasks.first()) }
+
     /** For turns that may only read: searching the web and opening a page. */
     fun lookupOnly(): JsonArray = buildJsonArray { add(search); add(readPage) }
 

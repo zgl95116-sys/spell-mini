@@ -33,19 +33,24 @@ object Web {
     private const val MAX_TEXT = 6_000
     private const val AGENT = "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Mobile Safari/537.36"
 
+    /** The same address check, for callers that open their own connection (streams). */
+    fun checked(url: String, ownNetwork: Boolean = false): String = safe(url, ownNetwork)
+
     /** Cleartext is blocked by the platform, and a phone has no business fetching its own network's admin pages. */
-    private fun safe(url: String): String {
+    private fun safe(url: String, ownNetwork: Boolean = false): String {
         val fixed = url.trim().replaceFirst(Regex("^http://", RegexOption.IGNORE_CASE), "https://")
         if (!fixed.startsWith("https://", ignoreCase = true)) throw IOException("只能读 http(s) 网址")
         val host = fixed.removePrefix("https://").substringBefore('/').substringBefore(':').lowercase()
+        if (ownNetwork) return fixed
         if (host == "localhost" || host.startsWith("127.") || host.startsWith("10.") || host.startsWith("192.168.") || Regex("^172\\.(1[6-9]|2\\d|3[01])\\.").containsMatchIn(host)) {
             throw IOException("不读本机和内网地址")
         }
         return fixed
     }
 
-    private suspend fun fetch(url: String, maxBytes: Long = MAX_BYTES): Triple<ByteArray, String?, String> = withContext(Dispatchers.IO) {
-        val request = Request.Builder().url(safe(url)).header("User-Agent", AGENT).header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.6").build()
+    private suspend fun fetch(url: String, maxBytes: Long = MAX_BYTES, headers: Map<String, String> = emptyMap(), ownNetwork: Boolean = false): Triple<ByteArray, String?, String> = withContext(Dispatchers.IO) {
+        val request = Request.Builder().url(safe(url, ownNetwork)).header("User-Agent", AGENT).header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.6")
+            .apply { headers.forEach { (name, value) -> header(name, value) } }.build()
         http.newCall(request).execute().use { response ->
             if (!response.isSuccessful) throw IOException("HTTP ${response.code}")
             val body = response.body ?: throw IOException("空响应")
@@ -85,8 +90,8 @@ object Web {
      * The readable text of a page. Menus and link lists are short lines; body text is long lines or lines that end in
      * punctuation, so keeping those gets the article without a DOM parser or a new dependency.
      */
-    suspend fun readPage(url: String): PageText {
-        val (bytes, charset, finalUrl) = fetch(url)
+    suspend fun readPage(url: String, headers: Map<String, String> = emptyMap(), ownNetwork: Boolean = false): PageText {
+        val (bytes, charset, finalUrl) = fetch(url, headers = headers, ownNetwork = ownNetwork)
         val html = decode(bytes, charset)
         val title = Regex("""(?is)<title[^>]*>(.*?)</title>""").find(html)?.groupValues?.get(1)?.let { plain(it).trim() }.orEmpty().take(120)
         val lines = plain(html).lines().map { it.replace(Regex("[ \\t\\u00A0\\u3000]+"), " ").trim() }
@@ -98,8 +103,12 @@ object Web {
     }
 
     /** A response body as text, for public JSON endpoints read as if they were feeds. Returns the text and the final address. */
-    suspend fun readText(url: String, maxBytes: Long = MAX_BYTES): Pair<String, String> {
-        val (bytes, charset, finalUrl) = fetch(url, maxBytes)
+    /**
+     * [ownNetwork] lets the address be on the phone's own network. Only for addresses the user typed in himself (his
+     * Home Assistant, his NAS); anything a model asks for stays barred from there.
+     */
+    suspend fun readText(url: String, maxBytes: Long = MAX_BYTES, headers: Map<String, String> = emptyMap(), ownNetwork: Boolean = false): Pair<String, String> {
+        val (bytes, charset, finalUrl) = fetch(url, maxBytes, headers, ownNetwork)
         return decode(bytes, charset) to finalUrl
     }
 

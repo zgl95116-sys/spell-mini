@@ -15,6 +15,17 @@
         tools:ignore="QueryAllPackagesPermission" />
     <uses-permission android:name="com.android.alarm.permission.SET_ALARM" />
     <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
+    <!-- Each of these belongs to one switch on the signals page and is asked for when that switch is turned on. -->
+    <!-- The name of the connected Wi-Fi tells home from work; Android only gives it to apps that may read the location. -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
+    <!-- New screenshots, when the screenshot moment is on. -->
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
+    <!-- Which app is in front, when that signal is on. Granted by the user on a system page, never by a dialog. -->
+    <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS" tools:ignore="ProtectedPermissions" />
     <!-- Read-only, asked for from the settings page: the agenda for briefs, and whether a proposed time is free. -->
     <uses-permission android:name="android.permission.READ_CALENDAR" />
 

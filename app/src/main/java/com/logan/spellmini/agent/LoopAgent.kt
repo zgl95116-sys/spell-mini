@@ -53,6 +53,9 @@ class LoopAgent(private val db: AppDb, private val settings: Settings, private v
         }
     }
 
+    private fun sameParty(known: String, proposed: String): Boolean =
+        known.isBlank() || proposed.isBlank() || known == proposed || TextSim.similarity(known, proposed) >= 0.5
+
     /** For tests: one pass right now, whatever the pacing says. */
     suspend fun runNow() = run()
 
@@ -69,6 +72,10 @@ class LoopAgent(private val db: AppDb, private val settings: Settings, private v
         settings.lastLoopEventId = db.events().maxId() ?: 0
         if (events.isEmpty()) return
         val open = Graph.tasks.store.all().filter { it.kind == TaskKind.LOOP }
+        // The expiry radar rides on this pass: a membership running out is also "something with a date that should have a sequel".
+        val expiry = if (com.logan.spellmini.signals.SignalCatalog.find(com.logan.spellmini.signals.SignalCatalog.EXPIRY)?.let { settings.signalOn(it.id, it.defaultOn) } == true) """
+            |另一类也记：会员、订阅、证件、积分、优惠券、保险的到期日或自动续费日（「10 月 12 日到期」「3 天后将自动续费 25 元」）。title 写「某某到期」或「某某自动续费」，expectation 写到期或扣费的日期和金额；due_iso 写到期或扣费前两天的上午 10 点，那个时刻已经过了就写明天上午 10 点。只记 14 天之内的；促销券、满减券这类随手发的不记。
+        """.trimMargin() else ""
         val prompt = """
             |你在替用户留意「该有下文的事」。现在是 ${today.year} 年 ${clock.format(Date(now))}。接下来几天的日期和星期（写 due_iso 时直接查这张表，不要自己推算）：$week。
             |下面是他手机最近一天收到的、和他有关的通知，以及你已经记下、还在等下文的事。
@@ -78,6 +85,7 @@ class LoopAgent(private val db: AppDb, private val settings: Settings, private v
             |- 别人答应了他一个时间（「周五前回你」「周三上午十点前发您邮箱」「明天给你报价」）；
             |- 订单、物流、审核、退款给了明确的预计时间，到时应该有结果（「预计 9 月 23 日送达」「三个工作日内审核完」）。
             |不记：要他自己去做的事（打电话确认、缴费、取件、核对文档、参加会议）——那是提醒管的，不是等下文；没有时间的泛泛之谈；广告；已经有结果的事。
+            |$expiry
             |「后天中午前」「周四下班前」「三个工作日内」这类相对的说法也算明确的时间，按上面的日期表换算成具体时刻（下班前按 18:00，中午前按 12:00）。
             |先看最新的通知，逐条过一遍再下结论。
             |每次最多新增 3 条，宁缺毋滥；due_iso 写「到这个时间还没下文就该问一句」的时刻，本地时间，必须在将来 14 天之内。
@@ -109,7 +117,9 @@ class LoopAgent(private val db: AppDb, private val settings: Settings, private v
                 what.isBlank() -> "no expectation"
                 due <= now + 10 * 60_000L -> "due in the past or within ten minutes"
                 due > now + 14 * DAY_MS -> "due more than two weeks out"
-                open.any { TextSim.similarity(it.instruction, what) >= 0.6 } -> "already tracked"
+                // Two people promising the same thing for the same hour are two things to wait for: the wording alone says
+                // "same", so who it came from has to match as well.
+                open.any { TextSim.similarity(it.instruction, what) >= 0.6 && sameParty(it.about, item.str("about").orEmpty()) } -> "already tracked"
                 else -> null
             }
             if (dropped != null || due == null) {

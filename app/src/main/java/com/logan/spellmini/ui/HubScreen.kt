@@ -56,6 +56,7 @@ import com.logan.spellmini.data.Handled
 import com.logan.spellmini.data.NotifEvent
 import com.logan.spellmini.data.Outcome
 import com.logan.spellmini.data.Route
+import com.logan.spellmini.signals.SignalCatalog
 import com.logan.spellmini.sources.Subscriptions
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -69,7 +70,7 @@ import kotlinx.serialization.json.put
 import java.io.File
 import java.util.Calendar
 
-private enum class HubTab(val label: String) { TRACE("通知流水"), TASKS("在办"), PROFILE("画像"), SETTINGS("设置") }
+private enum class HubTab(val label: String) { TRACE("流水"), SIGNALS("信号"), TASKS("在办"), PROFILE("画像"), SETTINGS("设置") }
 
 @Composable
 fun HubScreen(onBack: () -> Unit) {
@@ -91,6 +92,7 @@ fun HubScreen(onBack: () -> Unit) {
         HorizontalDivider(color = Ink.Line)
         when (tab) {
             HubTab.TRACE -> TraceTab()
+            HubTab.SIGNALS -> SignalsTab()
             HubTab.TASKS -> TasksTab()
             HubTab.PROFILE -> ProfileTab()
             HubTab.SETTINGS -> SettingsTab()
@@ -98,10 +100,11 @@ fun HubScreen(onBack: () -> Unit) {
     }
 }
 
-private val traceFilters = listOf("全部", Route.CHAT, Route.FEED, Route.IGNORE, "订阅", "二判", "已过滤", "出错")
+private val traceFilters = listOf("全部", Route.CHAT, Route.FEED, Route.IGNORE, "时刻", "订阅", "二判", "已过滤", "出错")
 
 private fun NotifEvent.matches(filter: String): Boolean = when (filter) {
     "全部" -> true
+    "时刻" -> SignalCatalog.isMoment(this)
     "订阅" -> Subscriptions.isItem(this)
     // On an item of a subscribed source that field holds JEV's closeness score, not a second opinion.
     "二判" -> secondJudgeNote != null && !Subscriptions.isItem(this)
@@ -155,7 +158,8 @@ private fun TodaySummary(events: List<NotifEvent>) {
     }
     val today = events.filter { it.postedAt >= startOfDay }
     val items = today.count { Subscriptions.isItem(it) }
-    val received = today.count { it.status != EventStatus.INTEREST && it.status != EventStatus.TASK && !Subscriptions.isItem(it) }
+    val moments = today.count { SignalCatalog.isMoment(it) }
+    val received = today.count { it.status != EventStatus.INTEREST && it.status != EventStatus.TASK && !Subscriptions.isItem(it) && !SignalCatalog.isMoment(it) }
     val patrols = today.count { it.status == EventStatus.INTEREST }
     val judged = today.filter { it.status == EventStatus.JUDGED }
     val latencies = judged.mapNotNull { it.jevLatencyMs }.sorted()
@@ -166,8 +170,8 @@ private fun TodaySummary(events: List<NotifEvent>) {
     val cards = today.count { it.outcome == Outcome.FEED_CARD }
     Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp)) {
         Text(
-            "今天收到 $received 条通知，送 JEV 判断 ${judged.count { !Subscriptions.isItem(it) }} 条" +
-                (if (items > 0) "；订阅源 $items 条" else "") + if (patrols > 0) "；兴趣巡查 $patrols 个选题" else "",
+            "今天收到 $received 条通知，送 JEV 判断 ${judged.count { !Subscriptions.isItem(it) && !SignalCatalog.isMoment(it) }} 条" +
+                (if (items > 0) "；订阅源 $items 条" else "") + (if (moments > 0) "；时刻 $moments 个" else "") + if (patrols > 0) "；兴趣巡查 $patrols 个选题" else "",
             color = Ink.Black, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
         )
         Spacer(Modifier.height(4.dp))
@@ -206,7 +210,8 @@ private fun EventRow(event: NotifEvent, onClick: () -> Unit) {
     val (label, color) = event.verdictLabel()
     Column(Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 16.dp, vertical = 10.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(event.appName + if (event.synthetic && !Subscriptions.isItem(event)) " · 模拟" else "", color = Ink.Muted, fontSize = 12.sp, maxLines = 1)
+            val simulated = event.synthetic && !Subscriptions.isItem(event) && !SignalCatalog.isMoment(event) && !SignalCatalog.isPush(event)
+            Text(event.appName + if (simulated) " · 模拟" else "", color = Ink.Muted, fontSize = 12.sp, maxLines = 1)
             Spacer(Modifier.width(8.dp))
             Text(formatClock(event.postedAt), color = Ink.Faint, fontSize = 12.sp)
             Spacer(Modifier.weight(1f))
@@ -417,6 +422,9 @@ private suspend fun exportEverything(context: Context) {
                 }
             }))
             put("subscription_fit_threshold", settings.subscriptionFitTenths / 10.0)
+            // Which context sources were on: without it a reviewer cannot tell why JEV did or did not know something.
+            put("signals", buildJsonObject { SignalCatalog.ALL.forEach { put(it.id, settings.signalOn(it.id, it.defaultOn)) } })
+            put("places_set", buildJsonObject { put("home", settings.homeWifi.isNotBlank()); put("work", settings.workWifi.isNotBlank()); put("city", settings.cityName) })
             put("apps", kotlinx.serialization.json.JsonArray(Graph.db.appRules().list().map {
                 buildJsonObject { put("package", it.pkg); put("name", it.appName); put("enabled", it.enabled); put("count", it.count) }
             }))

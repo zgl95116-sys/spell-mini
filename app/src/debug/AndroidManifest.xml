@@ -17,6 +17,13 @@
                 <action android:name="com.logan.spellmini.DEBUG_SHARE_IMAGE" />
                 <action android:name="com.logan.spellmini.DEBUG_ITEM" />
                 <action android:name="com.logan.spellmini.DEBUG_POLL" />
+                <action android:name="com.logan.spellmini.DEBUG_SIGNAL" />
+                <action android:name="com.logan.spellmini.DEBUG_MOMENT" />
+                <action android:name="com.logan.spellmini.DEBUG_NOW" />
+                <action android:name="com.logan.spellmini.DEBUG_CAP" />
+                <action android:name="com.logan.spellmini.DEBUG_FORGET" />
+                <action android:name="com.logan.spellmini.DEBUG_PLACE" />
+                <action android:name="com.logan.spellmini.DEBUG_SOURCE" />
             </intent-filter>
         </receiver>
     </application>

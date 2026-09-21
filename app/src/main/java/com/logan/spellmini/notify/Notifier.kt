@@ -14,6 +14,7 @@ import com.logan.spellmini.R
 enum class Delivery(val label: String) {
     ALERT("已弹出提醒"),
     NORMAL("已发通知（响铃，不弹出）"),
+    QUIET("已发通知（静默：你此刻不方便，等你拿起手机再看）"),
     BLOCKED("系统里关了 Spell Mini 的通知，只能在 Chat 里看到"),
 }
 
@@ -23,22 +24,24 @@ object Notifier {
     // silent IMPORTANCE_LOW channel for almost everything, which looked like nothing had been sent.
     private const val ALERT = "proactive_alert_v2"
     private const val NORMAL = "proactive_normal_v2"
+    private const val QUIET = "proactive_quiet_v3"
     private val RETIRED = listOf("proactive_loud", "proactive_quiet")
 
     /** [id] ties the notification to what it is about, so [cancel] can take it back once the user has dealt with that. */
-    fun proactive(context: Context, title: String, text: String, alert: Boolean, id: Int = (System.currentTimeMillis() % Int.MAX_VALUE).toInt()): Delivery {
+    fun proactive(context: Context, title: String, text: String, alert: Boolean, id: Int = (System.currentTimeMillis() % Int.MAX_VALUE).toInt(), quiet: Boolean = false): Delivery {
         if (!NotificationManagerCompat.from(context).areNotificationsEnabled()) return Delivery.BLOCKED
         val manager = context.getSystemService(NotificationManager::class.java)
         RETIRED.forEach(manager::deleteNotificationChannel)
         manager.createNotificationChannel(NotificationChannel(ALERT, "主动消息（要紧，弹出）", NotificationManager.IMPORTANCE_HIGH))
         manager.createNotificationChannel(NotificationChannel(NORMAL, "主动消息（一般）", NotificationManager.IMPORTANCE_DEFAULT))
+        manager.createNotificationChannel(NotificationChannel(QUIET, "主动消息（你不方便时，静默）", NotificationManager.IMPORTANCE_LOW))
         val open = PendingIntent.getActivity(
             context, 1,
             Intent(context, MainActivity::class.java).putExtra(MainActivity.EXTRA_OPEN_CHAT, true)
                 .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
-        val notification = NotificationCompat.Builder(context, if (alert) ALERT else NORMAL)
+        val notification = NotificationCompat.Builder(context, if (quiet) QUIET else if (alert) ALERT else NORMAL)
             .setSmallIcon(R.drawable.ic_stat_spell)
             .setContentTitle(title)
             .setContentText(text)
@@ -49,7 +52,7 @@ object Notifier {
             .setContentIntent(open)
             .build()
         manager.notify(id, notification)
-        return if (alert) Delivery.ALERT else Delivery.NORMAL
+        return if (quiet) Delivery.QUIET else if (alert) Delivery.ALERT else Delivery.NORMAL
     }
 
     fun cancel(context: Context, id: Int) = context.getSystemService(NotificationManager::class.java).cancel(id)

@@ -85,6 +85,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import com.logan.spellmini.data.MsgKind
 import com.logan.spellmini.data.MsgRole
+import com.logan.spellmini.signals.SignalCatalog
 import com.logan.spellmini.sources.Subscriptions
 
 @Composable
@@ -174,7 +175,7 @@ private fun MessageRow(message: ChatMsg, liveText: String?) {
                 attachments?.docId?.let { docId -> DocCard(attachments.docTitle.orEmpty()) { Graph.openDoc.value = docId } }
                 if (!attachments?.links.isNullOrEmpty()) LinkRow(attachments!!.links)
                 // A message about a subscribed item carries the item's link card instead of a notification to jump back to.
-                val hasOriginal = fromNotification && !Subscriptions.isItemLabel(message.sourceLabel)
+                val hasOriginal = fromNotification && !Subscriptions.isItemLabel(message.sourceLabel) && message.sourceLabel?.startsWith(SignalCatalog.MOMENT_LABEL) != true && message.sourceLabel?.startsWith(SignalCatalog.PUSH_LABEL) != true
                 if (hasOriginal || !attachments?.actions.isNullOrEmpty()) ChipColumn(message, attachments?.actions.orEmpty(), hasOriginal)
                 if (fromNotification) FeedbackRow(message, attachments)
             }

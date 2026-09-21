@@ -46,7 +46,7 @@ interface EventDao {
     suspend fun withOutcomeSince(outcome: String, since: Long, limit: Int): List<NotifEvent>
 
     /** What the phone itself received. Items of subscribed sources say nothing about his life, so the profile and the open loops never read them. */
-    @Query("SELECT * FROM events WHERE status = 'JUDGED' AND pkg NOT LIKE 'feed.%' ORDER BY postedAt DESC LIMIT :limit")
+    @Query("SELECT * FROM events WHERE status = 'JUDGED' AND pkg NOT LIKE 'feed.%' AND pkg NOT LIKE 'signal.%' ORDER BY postedAt DESC LIMIT :limit")
     suspend fun recentJudged(limit: Int): List<NotifEvent>
 
     /** Same-source context handed to JEV so it can spot repeats and updates. */
@@ -55,6 +55,27 @@ interface EventDao {
             "ORDER BY postedAt DESC LIMIT :limit"
     )
     suspend fun recentFromApp(pkg: String, since: Long, excludeId: Long, limit: Int): List<NotifEvent>
+
+    /** How often a conversation (same app, same title) reached the phone: the denominator of "how much does he care". */
+    @Query("SELECT COUNT(*) FROM events WHERE pkg = :pkg AND title = :title AND status IN ('JUDGED', 'FILTERED', 'ERROR') AND postedAt >= :since")
+    suspend fun countConversation(pkg: String, title: String, since: Long): Int
+
+    /** What he did about that conversation's notifications: one [Handled] value per reaction. */
+    @Query("SELECT filterReason FROM events WHERE pkg = :pkg AND title = :title AND status = 'SEEN' AND postedAt >= :since")
+    suspend fun reactions(pkg: String, title: String, since: Long): List<String>
+
+    /** Everything that arrived under the same name lately, from any app and whatever became of it: someone trying several channels. */
+    @Query("SELECT * FROM events WHERE title = :title AND postedAt >= :since AND id != :excludeId AND status != 'SEEN' ORDER BY postedAt DESC LIMIT 20")
+    suspend fun sameNameSince(title: String, since: Long, excludeId: Long): List<NotifEvent>
+
+    @Query("SELECT COUNT(*) FROM events WHERE pkg = :pkg AND postedAt >= :since")
+    suspend fun countByPkgSince(pkg: String, since: Long): Int
+
+    /** For tests: forgetting a moment's rows also resets its cooldown and its count for the day. */
+    @Query("DELETE FROM events WHERE pkg = :pkg") suspend fun deleteByPkg(pkg: String): Int
+
+    @Query("SELECT MAX(postedAt) FROM events WHERE pkg = :pkg")
+    suspend fun lastAtByPkg(pkg: String): Long?
 
     @Query("SELECT COUNT(*) FROM events WHERE pkg = :pkg AND title = :title AND text = :text AND postedAt >= :since")
     suspend fun countSame(pkg: String, title: String, text: String, since: Long): Int
@@ -84,7 +105,7 @@ interface EventDao {
     @Query("SELECT * FROM events WHERE status = 'INTEREST' AND postedAt >= :since ORDER BY postedAt DESC LIMIT 60")
     suspend fun recentInterestTopics(since: Long): List<NotifEvent>
 
-    @Query("SELECT COUNT(*) FROM events WHERE status = 'JUDGED' AND id > :afterId AND pkg NOT LIKE 'feed.%'")
+    @Query("SELECT COUNT(*) FROM events WHERE status = 'JUDGED' AND id > :afterId AND pkg NOT LIKE 'feed.%' AND pkg NOT LIKE 'signal.%'")
     suspend fun countJudgedAfter(afterId: Long): Int
 
     @Query("SELECT MAX(id) FROM events") suspend fun maxId(): Long?

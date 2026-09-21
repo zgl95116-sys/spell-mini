@@ -35,6 +35,8 @@ import com.logan.spellmini.pipeline.Downstream
 import com.logan.spellmini.pipeline.Pipeline
 import com.logan.spellmini.sources.CalendarSource
 import com.logan.spellmini.sources.Subscriptions
+import com.logan.spellmini.signals.MomentPlaybook
+import com.logan.spellmini.signals.SignalCatalog
 import com.logan.spellmini.tasks.TaskResult
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.async
@@ -64,7 +66,7 @@ import kotlin.math.abs
 private data class Chip(val tool: String, val args: JsonObject, val label: String)
 
 /** What one turn has done so far. Filled in by the tool handlers, read when the reply is put together. */
-private class Turn(val mode: TurnMode, val eventId: Long?, val readOnly: Boolean = false) {
+private class Turn(val mode: TurnMode, val eventId: Long?, val readOnly: Boolean = false, val moment: Boolean = false) {
     val startedAt = System.currentTimeMillis()
     val chips = mutableListOf<Chip>()
     val sources = mutableListOf<Source>()
@@ -176,7 +178,7 @@ class ChatAgent(
         }
     }
 
-    private suspend fun describeImage(path: String): String {
+    suspend fun describeImage(path: String): String {
         val bytes = java.io.File(path).readBytes()
         val message = buildJsonObject {
             put("role", "user")
@@ -194,8 +196,35 @@ class ChatAgent(
         return api.chat(buildJsonArray { add(message) }, maxTokens = 1_500).content.ifBlank { "（图片内容没能读出来）" }.take(4_000)
     }
 
+    /**
+     * A moment on the phone that JEV thought worth a word (see signals/DeviceMoments). The playbook says what to gather
+     * and when to say nothing; most moments should end in silence.
+     */
+    private suspend fun onMoment(event: NotifEvent): Downstream = turnLock.withLock {
+        val id = SignalCatalog.momentId(event).orEmpty()
+        activity.value = "留意到：${event.appName.removePrefix(SignalCatalog.MOMENT_LABEL).take(10)}"
+        try {
+            val turn = Turn(TurnMode.TRIGGER, event.id, moment = true)
+            val prompt = MomentPlaybook(context, db).prompt(id, event)
+            val result = runVerified(assemble(systemPrompt(), history(beforeId = null) + ("user" to prompt)), turn, streamInto = null)
+            val silent = SILENT.find(result.text)
+            if (silent != null && !result.acted) return@withLock Downstream(Outcome.CHAT_SILENT, silent.groupValues[2].trim().ifBlank { "这一刻没有可说的" }, null, result.costUsd, result.latencyMs)
+            val (reply, attachments) = present(result.copy(text = result.text.replace(SILENT, "").trim()))
+            if (reply.isBlank()) return@withLock Downstream(Outcome.CHAT_SILENT, result.note ?: "这一刻没有可说的", null, result.costUsd, result.latencyMs)
+            val label = listOf(event.appName, event.title).filter { it.isNotBlank() }.distinct().joinToString(" · ").take(60)
+            val messageId = deliver(reply, attachments, label, event.id, turn.startedAt)
+            val delivery = if (Graph.chatOnScreen.value) "你当时正在看 Chat，没有另发通知" else {
+                val quiet = Pipeline.deliverQuietly(event)
+                Notifier.proactive(context, title = label, text = reply, alert = false, id = Notifier.idFor(event.id), quiet = quiet).label
+            }
+            Downstream(Outcome.CHAT_SENT, listOfNotNull(delivery, result.note).joinToString(" · "), messageId, result.costUsd, result.latencyMs)
+        } finally {
+            activity.value = null
+        }
+    }
+
     /** Called by the pipeline when JEV routes a notification to chat. The model may answer with silence. */
-    suspend fun onTrigger(event: NotifEvent): Downstream = turnLock.withLock {
+    suspend fun onTrigger(event: NotifEvent): Downstream = if (SignalCatalog.isMoment(event)) onMoment(event) else turnLock.withLock {
         // An item from a subscribed source takes the same road, with a higher bar: nobody sent it to him.
         val item = Subscriptions.isItem(event)
         activity.value = if (item) "在看一条订阅更新" else "在看一条${event.appName}通知"
@@ -239,12 +268,17 @@ class ChatAgent(
             }
             val label = listOf(event.appName, event.title).filter { it.isNotBlank() }.joinToString(" · ").take(60)
             val id = deliver(text, attachments, label, event.id, turn.startedAt)
+            // He dealt with the notification while this turn was running, and the message still goes out because it brings
+            // something new (a drafted reply, a button). The removal came before there was a message to mark, so mark it now.
+            if (meanwhile != null) markMessage(id, meanwhile)
             // The user already sees the message when the chat is open; otherwise raise our own notification.
             val delivery = if (Graph.chatOnScreen.value) {
                 "你当时正在看 Chat，没有另发通知"
             } else {
-                val alert = (event.urgency ?: 0.0) >= Graph.settings.alertUrgencyTenths / 10.0
-                Notifier.proactive(context, title = label.ifBlank { "Spell" }, text = text, alert = alert, id = Notifier.idFor(event.id)).label
+                // JEV read what he is doing right now: in a meeting or asleep, the message still arrives, without a sound.
+                val quiet = Pipeline.deliverQuietly(event)
+                val alert = !quiet && (event.urgency ?: 0.0) >= Graph.settings.alertUrgencyTenths / 10.0
+                Notifier.proactive(context, title = label.ifBlank { "Spell" }, text = text, alert = alert, id = Notifier.idFor(event.id), quiet = quiet).label
             }
             Downstream(Outcome.CHAT_SENT, listOfNotNull(delivery, result.note).joinToString(" · "), id, result.costUsd, result.latencyMs)
         } finally {
@@ -381,6 +415,10 @@ class ChatAgent(
         if (event.outcome != Outcome.CHAT_SENT) return
         val messageId = event.outcomeRefId ?: return
         Notifier.cancel(context, Notifier.idFor(event.id))
+        markMessage(messageId, how)
+    }
+
+    private suspend fun markMessage(messageId: Long, how: String) {
         attachLock.withLock {
             val row = db.messages().get(messageId) ?: return@withLock
             val current = Attachments.parse(row.cardJson) ?: Attachments()
@@ -576,7 +614,7 @@ class ChatAgent(
         val reasoning = if (turn.mode == TurnMode.USER) Reasoning.LOW else Reasoning.ON
         // A turn about a feed item may look things up and nothing else: the text comes from a stranger's feed, and no
         // reminder, draft or button belongs under news nobody sent him.
-        val tools = if (turn.readOnly) ChatTools.lookupOnly() else ChatTools.forMode(turn.mode)
+        val tools = if (turn.readOnly) ChatTools.lookupOnly() else if (turn.moment) ChatTools.forMoment() else ChatTools.forMode(turn.mode)
         val messages = initial.toMutableList()
         var cost = 0.0
         var latency = 0L

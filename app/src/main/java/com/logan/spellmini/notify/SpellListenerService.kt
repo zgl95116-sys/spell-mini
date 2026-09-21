@@ -8,6 +8,8 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.logan.spellmini.Graph
 import com.logan.spellmini.data.Handled
+import com.logan.spellmini.signals.Activities
+import com.logan.spellmini.signals.OngoingActivity
 import com.logan.spellmini.sources.MediaSignals
 
 /** Plain snapshot of a posted notification, detached from framework objects. */
@@ -25,12 +27,17 @@ data class RawNotification(
     /** Conversation notifications only: time of the newest message they carry, and whether the user wrote it. */
     val latestMessageAt: Long? = null,
     val latestFromUser: Boolean = false,
+    /** How the app itself and the user filed this notification: the channel's name, its importance, a conversation he marked as priority. */
+    val channel: String? = null,
+    val importance: Int? = null,
+    val priorityConversation: Boolean = false,
 )
 
 class SpellListenerService : NotificationListenerService() {
 
     override fun onListenerConnected() {
         Log.i(TAG, "listener connected")
+        instance = this
         Graph.listenerConnected.value = true
         KeepAliveService.start(this)
         MediaSignals.attach(this)
@@ -45,6 +52,7 @@ class SpellListenerService : NotificationListenerService() {
 
     override fun onListenerDisconnected() {
         Log.w(TAG, "listener disconnected")
+        if (instance === this) instance = null
         Graph.listenerConnected.value = false
     }
 
@@ -52,6 +60,8 @@ class SpellListenerService : NotificationListenerService() {
 
     override fun onNotificationRemoved(sbn: StatusBarNotification, rankingMap: RankingMap, reason: Int) {
         if (sbn.packageName == packageName || (sbn.notification.flags and Notification.FLAG_GROUP_SUMMARY) != 0) return
+        // A status light going out is a moment of its own: the call ended, the navigation arrived, the alarm was switched off.
+        Activities.classify(sbn, appLabel(sbn.packageName))?.let { Graph.moments.onActivityEnded(it, sbn.key, sbn.postTime) }
         val how = when (reason) {
             REASON_CLICK -> Handled.OPENED
             REASON_CANCEL, REASON_CANCEL_ALL -> Handled.DISMISSED
@@ -66,6 +76,7 @@ class SpellListenerService : NotificationListenerService() {
     private fun handle(sbn: StatusBarNotification) {
         // Never react to our own notifications, otherwise proactive messages would trigger themselves.
         if (sbn.packageName == packageName) return
+        Activities.classify(sbn, appLabel(sbn.packageName))?.let { Graph.moments.onActivityStarted(it, sbn.key) }
         val raw = runCatching { extract(sbn) }
             .onFailure { Log.w(TAG, "extract failed for ${sbn.packageName}", it) }
             .getOrNull() ?: return
@@ -111,6 +122,7 @@ class SpellListenerService : NotificationListenerService() {
             else -> lines
         }
         val text = listOf(body, sub).filter { it.isNotBlank() }.joinToString("\n").take(MAX_TEXT)
+        val ranking = rankingOf(sbn)
 
         return RawNotification(
             key = sbn.key,
@@ -124,8 +136,15 @@ class SpellListenerService : NotificationListenerService() {
             groupSummary = (n.flags and Notification.FLAG_GROUP_SUMMARY) != 0,
             latestMessageAt = newest?.timestamp?.takeIf { it > 0 },
             latestFromUser = newestIsMine,
+            channel = ranking?.channel?.name?.toString()?.take(40),
+            importance = ranking?.importance,
+            priorityConversation = ranking?.channel?.isImportantConversation == true,
         )
     }
+
+    private fun rankingOf(sbn: StatusBarNotification): Ranking? = runCatching {
+        Ranking().takeIf { currentRanking.getRanking(sbn.key, it) }
+    }.getOrNull()
 
     private fun appLabel(pkg: String): String = runCatching {
         packageManager.getApplicationLabel(packageManager.getApplicationInfo(pkg, 0)).toString()
@@ -133,6 +152,18 @@ class SpellListenerService : NotificationListenerService() {
 
     companion object {
         private const val TAG = "SpellListener"
+
+        /** The connected listener, for reading the shade on demand. Null whenever the system has it unbound. */
+        @Volatile private var instance: SpellListenerService? = null
+
+        /** What the shade says he is in the middle of, right now. */
+        fun activities(): List<OngoingActivity> {
+            val service = instance ?: return emptyList()
+            return runCatching { service.activeNotifications }.getOrNull().orEmpty()
+                .filter { it.packageName != service.packageName }
+                .mapNotNull { Activities.classify(it, service.appLabel(it.packageName)) }
+        }
+
         private const val MAX_TEXT = 2_000
         private const val MAX_MESSAGES = 6
         private const val INITIAL_SWEEP_LIMIT = 30
