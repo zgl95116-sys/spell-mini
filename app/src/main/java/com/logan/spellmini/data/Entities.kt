@@ -56,6 +56,10 @@ object Outcome {
     const val FEED_CARD = "FEED_CARD"
     const val FEED_SKIPPED = "FEED_SKIPPED"
     const val CAPPED = "CAPPED"
+    /** Worth a message, but not now: waits for the next break (a meeting ended, he picked the phone up) and goes out in one digest. */
+    const val HELD = "HELD"
+    /** Was held, and has been told as part of a digest message ([NotifEvent.outcomeRefId] is that message). */
+    const val DIGESTED = "DIGESTED"
     const val ERROR = "ERROR"
     const val NONE = "NONE"
 }

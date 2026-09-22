@@ -163,7 +163,8 @@ object Presets {
         FeedSource(name = "少数派", url = "https://sspai.com/feed", everyMin = 120, preset = true),
         FeedSource(name = "Hacker News 首页", url = "https://hnrss.org/frontpage", everyMin = 60, preset = true),
         FeedSource(name = "Product Hunt", url = "https://www.producthunt.com/feed", everyMin = 180, preset = true, enabled = false),
-        FeedSource(name = "IT之家", url = "https://www.ithome.com/rss/", everyMin = 60, preset = true, enabled = false),
+        // Two hundred items a day of consumer tech; at the usual bar it filled a real feed with a card an hour.
+        FeedSource(name = "IT之家", url = "https://www.ithome.com/rss/", everyMin = 60, preset = true, enabled = false, config = mapOf(SourceConfig.FIT to "2.5")),
         FeedSource(name = "arXiv · cs.AI", url = "https://rss.arxiv.org/rss/cs.AI", everyMin = 360, preset = true, enabled = false),
     )
 

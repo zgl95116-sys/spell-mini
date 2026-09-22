@@ -360,10 +360,13 @@ class Pipeline(
         val criteria = settings.criteria
         val item = Subscriptions.isItem(event)
         val moment = SignalCatalog.isMoment(event)
-        val state = buildState(event)
-        val questions = buildQuestions(criteria, item, moment)
+        val built = buildState(event)
+        // The interrupt question reads his state. When the state shows nothing that occupies him there is nothing to
+        // read, and asked anyway JEV wavered around 0.5 on plain messages; so the question is only put when it has a case.
+        val occupied = built.factKeys.any { it in OCCUPYING }
+        val questions = buildQuestions(criteria, item, moment, askInterrupt = !item && occupied)
 
-        val verdict = runCatching { jevSlots.withPermit { api.decide(state, questions) } }
+        val verdict = runCatching { jevSlots.withPermit { api.decide(built.state, questions) } }
         event = verdict.fold(
             onSuccess = { result ->
                 val route = result.answers.obj("route")
@@ -373,7 +376,9 @@ class Pipeline(
                     routeProbs = route?.obj("probabilities")?.toString(),
                     confidence = route?.dbl("confidence"),
                     urgency = result.answers.obj("urgency")?.dbl("score"),
-                    jevModel = result.model, jevSource = JEV_SOURCE + interruptNote(result.answers.obj(INTERRUPT)),
+                    // What JEV was told about the moment rides along with its verdict: when every message of a day
+                    // came out "later", this is how the fact responsible was found.
+                    jevModel = result.model, jevSource = JEV_SOURCE + interruptNote(result.answers.obj(INTERRUPT), built.factKeys, asked = !item),
                     jevLatencyMs = result.latencyMs, jevCostUsd = result.costUsd, jevError = null,
                     criteriaVersion = criteria.version,
                 )
@@ -442,9 +447,20 @@ class Pipeline(
                 feedSlots.withPermit { onFeed?.invoke(event) }?.let { it.copy(note = "订阅内容今天已经主动说过 $ITEM_MESSAGES_PER_DAY 条，这条只进 Feed：${it.note.orEmpty()}".take(200)) }
                     ?: Downstream(Outcome.NONE, "Feed 尚未接入")
             } else chatGate.withLock {
-                if (db.events().countOutcomeSince(Outcome.CHAT_SENT, System.currentTimeMillis() - HOUR_MS) >= settings.chatPerHourCap) {
-                    // Over the hourly limit a notification waits in the trace; an item can still be a card, so it is not lost.
-                    val card = if (Subscriptions.isItem(event)) feedSlots.withPermit { onFeed?.invoke(event) } else null
+                val moment = SignalCatalog.isMoment(event)
+                val item = Subscriptions.isItem(event)
+                // The hourly cap exists so a busy chat app cannot make the assistant chatty. A moment has its own cooldown
+                // and daily cap, and there is one "arrived at work" a day: it must not be the thing the cap drops.
+                val overCap = !moment && db.events().countOutcomeSince(Outcome.CHAT_SENT, System.currentTimeMillis() - HOUR_MS) >= settings.chatPerHourCap
+                // A notification that can wait is not delivered on a silent channel, where twelve banners pile up unread;
+                // it is held and told with the others at the next break (see agent/Digest). A moment is its moment, and
+                // an item can be a card, so neither is held.
+                val later = !moment && !item && deliverQuietly(event, settings)
+                if (!moment && !item && (later || overCap)) {
+                    Downstream(Outcome.HELD, if (later) "此刻不便打扰" else "这一小时已经说了 ${settings.chatPerHourCap} 条")
+                } else if (overCap) {
+                    // Over the hourly limit an item can still be a card, so it is not lost.
+                    val card = feedSlots.withPermit { onFeed?.invoke(event) }
                     card?.copy(note = "已达每小时主动消息上限 ${settings.chatPerHourCap}，这条只进 Feed：${card.note.orEmpty()}".take(200))
                         ?: Downstream(Outcome.CAPPED, "已达每小时主动消息上限 ${settings.chatPerHourCap}，这条没有交给主模型")
                 } else {
@@ -469,7 +485,10 @@ class Pipeline(
         }
     }
 
-    private suspend fun buildState(event: NotifEvent): JsonObject {
+    /** The JEV state, and the keys of the right_now facts in it, for the trace row. */
+    private class Built(val state: JsonObject, val factKeys: List<String>)
+
+    private suspend fun buildState(event: NotifEvent): Built {
         val now = System.currentTimeMillis()
         val recent = db.events().recentFromApp(event.pkg, now - 2 * HOUR_MS, event.id, 5)
         val profile = profileText().ifBlank { "(empty: the user has not described themselves yet)" }
@@ -480,10 +499,11 @@ class Pipeline(
         // Cards he has, plus items that became a message instead of a card: either way he already knows.
         val recentCards = if (item) (db.feed().recentTitles(RECENT_CARD_TITLES) + db.events().itemTitlesRouted(now - 3 * DAY_MS, event.id, RECENT_CARD_TITLES)).distinct() else emptyList()
         // What he is doing and how much this sender has mattered: worked out on the phone, because JEV cannot do sums.
-        val rightNow = if (item) null else runCatching { this.now.toJson(this.now.facts()) }.getOrNull()
+        val facts = if (item) emptyList() else runCatching { this.now.facts() }.getOrDefault(emptyList())
+        val rightNow = if (item) null else runCatching { this.now.toJson(facts) }.getOrNull()
         val sender = if (item) null else runCatching { this.now.sender(event) }.getOrNull()
         val evidence = if (SignalCatalog.isMoment(event)) runCatching { momentEvidence?.invoke(event) }.getOrNull() else null
-        return buildJsonObject {
+        val state = buildJsonObject {
             rightNow?.let { put("right_now", it) }
             sender?.let { put("sender", it) }
             evidence?.let { put("moment_context", it) }
@@ -519,9 +539,10 @@ class Pipeline(
                 put("minutes_ago", (now - event.postedAt) / 60_000)
             }
         }
+        return Built(state, facts.map { it.key }.distinct())
     }
 
-    private fun buildQuestions(criteria: Criteria, item: Boolean, moment: Boolean): JsonObject = buildJsonObject {
+    private fun buildQuestions(criteria: Criteria, item: Boolean, moment: Boolean, askInterrupt: Boolean): JsonObject = buildJsonObject {
         if (moment) putJsonObject("route") {
             put("type", "choice")
             put("instructions", Criteria.COMMON + Criteria.MOMENT_INSTRUCTIONS)
@@ -543,7 +564,7 @@ class Pipeline(
             put("criteria", buildJsonArray { Criteria.URGENCY_LEVELS.forEach { add(kotlinx.serialization.json.JsonPrimitive(it)) } })
         }
         // Whether to make a sound about it now. Relevance is settled by the route; this only sets the volume.
-        if (!item) putJsonObject(INTERRUPT) {
+        if (askInterrupt) putJsonObject(INTERRUPT) {
             put("type", "choice")
             put("instructions", Criteria.COMMON + Criteria.INTERRUPT_INSTRUCTIONS)
             putJsonObject("criteria") { Criteria.INTERRUPT_CRITERIA.forEach { (key, value) -> put(key, value) } }
@@ -576,13 +597,26 @@ class Pipeline(
         private const val LATER_MARK = "｜打扰：later"
 
         /** True when JEV judged that this can be delivered quietly. Kept on the row's jevSource: the schema has no spare column. */
-        fun deliverQuietly(event: NotifEvent): Boolean = event.jevSource?.contains(LATER_MARK) == true
-
-        private fun interruptNote(answer: JsonObject?): String {
-            val choice = answer?.str("choice") ?: return ""
-            val sure = answer.obj("probabilities")?.dbl(choice)?.let { " %.2f".format(it) }.orEmpty()
-            return if (choice == Criteria.INTERRUPT_LATER) "$LATER_MARK$sure" else "｜打扰：now$sure"
+        /**
+         * "Later" from JEV means a silent delivery, unless the matter is urgent: the "must speak when urgent" setting
+         * outranks the moment, so a meeting starting in five minutes is never a banner he finds an hour later.
+         */
+        fun deliverQuietly(event: NotifEvent, settings: Settings): Boolean {
+            if (event.jevSource?.contains(LATER_MARK) != true) return false
+            val urgent = settings.mustSpeakWhenUrgent && (event.urgency ?: 0.0) >= settings.alertUrgencyTenths / 10.0
+            return !urgent
         }
+
+        private fun interruptNote(answer: JsonObject?, factKeys: List<String>, asked: Boolean): String {
+            if (!asked) return ""
+            val seen = if (factKeys.isEmpty()) "" else "｜此刻：" + factKeys.joinToString(",")
+            val choice = answer?.str("choice") ?: return "｜打扰：now（此刻无占用）$seen"
+            val sure = answer.obj("probabilities")?.dbl(choice)?.let { " %.2f".format(it) }.orEmpty()
+            return (if (choice == Criteria.INTERRUPT_LATER) "$LATER_MARK$sure" else "｜打扰：now$sure") + seen
+        }
+
+        /** The right_now fact keys that can make "later" the right answer; see [Criteria.INTERRUPT_CRITERIA]. */
+        private val OCCUPYING = setOf("doing", "calendar", "asleep", "quiet", "interruptions")
 
         private const val REPEAT = "repeat"
         private const val FIT = "fit"

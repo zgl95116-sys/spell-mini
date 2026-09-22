@@ -48,7 +48,19 @@ class DebugReceiver : BroadcastReceiver() {
             ACTION_SIGNAL -> Graph.settings.setSignal(intent.getStringExtra("id").orEmpty(), intent.getBooleanExtra("on", true))
             ACTION_MOMENT -> Graph.moments.fire(intent.getStringExtra("id").orEmpty(), intent.getStringExtra("title").orEmpty().ifBlank { "测试" }, text, force = intent.getBooleanExtra("force", true))
             // A test run sends far more proactive messages in an hour than a day of real use; the ceiling would hide what is being tested.
-            ACTION_CAP -> Graph.settings.chatPerHourCap = intent.getIntExtra("value", 8)
+            ACTION_CAP -> {
+                Graph.settings.chatPerHourCap = intent.getIntExtra("value", Graph.settings.chatPerHourCap)
+                // Tenths: 30 means nothing short of 3.0 counts as urgent, so a test can see every message held.
+                intent.getStringExtra("alert")?.toIntOrNull()?.let { Graph.settings.alertUrgencyTenths = it }
+            }
+            // The emulator has no ringer switch to press; the test that checks "vibrate is not a request for quiet" sets it here.
+            // A break in his day (meeting ended, phone picked up): what was held is told now.
+            ACTION_BREAK -> Graph.scope.launch { Log.i("SpellDebug", "digest: " + runCatching { Graph.digest.flushNow(intent.getStringExtra("reason").orEmpty().ifBlank { "测试断点" }, force = intent.getBooleanExtra("force", false)) }.getOrElse { it.message }) }
+            ACTION_RINGER -> context.getSystemService(android.media.AudioManager::class.java).ringerMode = when (intent.getStringExtra("mode")) {
+                "vibrate" -> android.media.AudioManager.RINGER_MODE_VIBRATE
+                "silent" -> android.media.AudioManager.RINGER_MODE_SILENT
+                else -> android.media.AudioManager.RINGER_MODE_NORMAL
+            }
             ACTION_PLACE -> { Graph.settings.homeWifi = intent.getStringExtra("home").orEmpty(); Graph.settings.workWifi = intent.getStringExtra("work").orEmpty() }
             ACTION_FORGET -> Graph.scope.launch { Graph.db.events().deleteByPkg(com.logan.spellmini.signals.SignalCatalog.MOMENT_PKG + intent.getStringExtra("id").orEmpty()) }
             ACTION_NOW -> Graph.scope.launch { Log.i("SpellDebug", "right_now: " + Graph.now.toJson(Graph.now.facts())) }
@@ -86,6 +98,8 @@ class DebugReceiver : BroadcastReceiver() {
         const val ACTION_MOMENT = "com.logan.spellmini.DEBUG_MOMENT"
         const val ACTION_NOW = "com.logan.spellmini.DEBUG_NOW"
         const val ACTION_CAP = "com.logan.spellmini.DEBUG_CAP"
+        const val ACTION_RINGER = "com.logan.spellmini.DEBUG_RINGER"
+        const val ACTION_BREAK = "com.logan.spellmini.DEBUG_BREAK"
         const val ACTION_FORGET = "com.logan.spellmini.DEBUG_FORGET"
         const val ACTION_PLACE = "com.logan.spellmini.DEBUG_PLACE"
         const val ACTION_SOURCE = "com.logan.spellmini.DEBUG_SOURCE"

@@ -21,6 +21,7 @@ import android.provider.MediaStore
 import android.util.Log
 import androidx.core.content.ContextCompat
 import com.logan.spellmini.actions.ReminderReceiver
+import com.logan.spellmini.Graph
 import com.logan.spellmini.data.AppDb
 import com.logan.spellmini.data.Settings
 import com.logan.spellmini.pipeline.Pipeline
@@ -49,6 +50,8 @@ class DeviceMoments(
     private val scope: CoroutineScope,
     /** Reads a picture into text; the chat agent's vision call. Only ever used for screenshots, and only when that moment is on. */
     private val describeImage: suspend (String) -> String,
+    /** A natural break in his day: what was held for him is told now (see agent/Digest). */
+    private val onBreak: (String) -> Unit = {},
 ) {
     private val main = Handler(Looper.getMainLooper())
     private val started = ConcurrentHashMap<String, Long>()
@@ -91,6 +94,8 @@ class DeviceMoments(
     fun onActivityEnded(activity: OngoingActivity, key: String, postedAt: Long) {
         val began = started.remove(key) ?: postedAt
         val minutes = ((System.currentTimeMillis() - began) / MINUTE_MS).coerceAtLeast(0)
+        // The end of a long call, a drive or a meeting on screen is a break: what was held during it is told now.
+        if (minutes >= 10 && activity.kind in setOf(ActivityKind.CALL, ActivityKind.NAVIGATION, ActivityKind.RIDE, ActivityKind.MEETING, ActivityKind.SCREEN_SHARE)) onBreak("${activity.kind.chinese}结束")
         when (activity.kind) {
             // A call of under a minute is a wrong number, a courier at the door or voicemail: nothing to write down.
             ActivityKind.CALL -> if (minutes >= 1) fire(
@@ -175,6 +180,7 @@ class DeviceMoments(
     private fun onUnlocked() {
         val away = screenOffAt.takeIf { it > 0 }?.let { (System.currentTimeMillis() - it) / MINUTE_MS } ?: return
         val hour = Calendar.getInstance().get(Calendar.HOUR_OF_DAY)
+        if (away >= BREAK_MIN) onBreak("放下手机 $away 分钟后拿起来")
         if (away >= AWAY_MIN && hour in 8..22) fire(SignalCatalog.BACK_TO_PHONE, "回到手机", "他放下手机约 $away 分钟后刚刚解锁。")
     }
 
@@ -188,8 +194,8 @@ class DeviceMoments(
         if (ssid == lastWifi) return
         lastWifi = ssid
         when {
-            settings.homeWifi.lines().any { it == ssid } -> fire(SignalCatalog.HOME, "到家", "他的手机刚连上家里的 Wi‑Fi，多半是到家了（${clock.format(Date())}）。")
-            settings.workWifi.lines().any { it == ssid } -> fire(SignalCatalog.WORK, "到公司", "他的手机刚连上公司的 Wi‑Fi，多半是到公司了（${clock.format(Date())}）。")
+            settings.homeWifi.lines().any { it == ssid } -> { onBreak("到家"); fire(SignalCatalog.HOME, "到家", "他的手机刚连上家里的 Wi‑Fi，多半是到家了（${clock.format(Date())}）。") }
+            settings.workWifi.lines().any { it == ssid } -> { onBreak("到公司"); fire(SignalCatalog.WORK, "到公司", "他的手机刚连上公司的 Wi‑Fi，多半是到公司了（${clock.format(Date())}）。") }
         }
     }
 
@@ -197,6 +203,9 @@ class DeviceMoments(
     private fun onImage(uri: Uri) {
         val imageId = uri.lastPathSegment?.toLongOrNull() ?: return
         if (!on(SignalCatalog.SCREENSHOT) || synchronized(handledShots) { imageId in handledShots }) return
+        // A screenshot of this app is him showing the assistant to someone, not asking it for anything: on one real
+        // day five of twelve shots were of Spell Mini itself, each one read by the model and answered with silence.
+        if (Graph.appInForeground.value) { Log.i(TAG, "screenshot of this app, not read"); return }
         scope.launch {
             runCatching {
                 delay(SCREENSHOT_SETTLE_MS) // the row appears before the file is complete
@@ -271,6 +280,7 @@ class DeviceMoments(
             fire(SignalCatalog.MEETING_SOON, event.title.take(40), "日历上的「${event.title}」${settings.meetingLeadMin} 分钟后开始（${clock.format(Date(event.begin))}–${clock.format(Date(event.end))}$place）。")
         }
         events.firstOrNull { kotlin.math.abs(it.end - now) < TICK_SLACK_MS && it.end - it.begin >= LONG_MEETING_MS }?.let { event ->
+            onBreak("开完「${event.title.take(16)}」")
             fire(SignalCatalog.MEETING_ENDED, event.title.take(40), "日历上的「${event.title}」刚到结束时间（开了 ${(event.end - event.begin) / MINUTE_MS} 分钟）。")
         }
         rearmSoon()
@@ -303,6 +313,8 @@ class DeviceMoments(
         private const val WAKE_FROM = 4
         private const val WAKE_UNTIL = 12
         private const val AWAY_MIN = 90
+        /** Away this long, coming back is a break worth a briefing; the "back to phone" moment itself needs longer. */
+        private const val BREAK_MIN = 30
         private const val WEATHER_HOUR = 20
         private const val WIFI_SETTLE_MS = 4_000L
         private const val SCREENSHOT_SETTLE_MS = 1_500L

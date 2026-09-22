@@ -108,7 +108,8 @@ fun SourcesManager() {
                         source.kind in SourceKind.PUSHED -> "已连接 · 累计收到 ${source.taken} 条"
                         else -> "上次 ${formatClock(source.lastPolledAt)} · 每 ${source.everyMin} 分钟 · 累计交给分流 ${source.taken} 条"
                     }
-                    Text("${SourceKind.label(source.kind)} · $state", color = if (source.enabled && source.lastError.isNotBlank()) Ink.Red else Ink.Muted, fontSize = 12.sp)
+                    val bar = source.config[SourceConfig.FIT]?.let { " · 成卡门槛 $it" }.orEmpty()
+                    Text("${SourceKind.label(source.kind)} · $state$bar", color = if (source.enabled && source.lastError.isNotBlank()) Ink.Red else Ink.Muted, fontSize = 12.sp)
                 }
                 if (!source.preset) Text("删除", color = Ink.Muted, fontSize = 12.sp, modifier = Modifier.padding(end = 10.dp).clickable { scope.launch { Graph.sources.remove(source.id); Graph.pushes.sync() } })
                 Switch(checked = source.enabled, onCheckedChange = { on -> scope.launch { Graph.sources.setEnabled(source.id, on); Graph.pushes.sync() } })

@@ -270,7 +270,7 @@ def wait_event(after_event_id, title, timeout=200):
     end = time.time() + timeout
     while time.time() < end:
         time.sleep(5)
-        rows = db(f"select id, finalRoute, outcome, outcomeNote, urgency from events where id>{after_event_id} and title='{title}' order by id desc limit 1")
+        rows = db(f"select id, finalRoute, outcome, outcomeNote, urgency, jevSource from events where id>{after_event_id} and title='{title}' order by id desc limit 1")
         if rows and rows[0]["outcome"] not in (None, "PENDING"): return rows[0]
     return None
 
@@ -602,7 +602,7 @@ def sources_in_store():
 def style_ok(card):
     """Every card is written to one spec (CardStyle): short title, a body of at most two sentences, up to three bullets of hard facts, no links in bullets."""
     bullets = json.loads(card["bulletsJson"] or "[]")
-    return (len(card["title"]) <= 24 and len(card["body"]) <= 84 and card["body"].count("。") <= 2 and len(bullets) <= 3
+    return (len(card["title"]) <= 32 and len(card["body"]) <= 84 and card["body"].count("。") <= 2 and len(bullets) <= 3
             and all(len(b) <= 28 and "http" not in b for b in bullets))
 
 
@@ -714,6 +714,8 @@ def grant_for_signals():
         adb("shell", "pm", "grant", PKG, f"android.permission.{p}")
     adb("shell", "appops", "set", PKG, "GET_USAGE_STATS", "allow")
     broadcast_int("DEBUG_CAP", 80)  # a test hour holds more proactive messages than a day of real use
+    # ...and for the same reason "messaged five times this hour" would hold every message of a run for the next break.
+    signal("fatigue", False)
 
 
 def broadcast_int(action, value):
@@ -751,7 +753,7 @@ def clear_events():
 
 
 def moment_rows(after_id, sid):
-    return db(f"select id, title, finalRoute, routeProbs, jevSource, outcome, outcomeNote from events where id>{after_id} and pkg='signal.{sid}' order by id")
+    return db(f"select id, title, text, finalRoute, routeProbs, jevSource, outcome, outcomeNote from events where id>{after_id} and pkg='signal.{sid}' order by id")
 
 
 def wait_moment(after_id, sid, timeout=200):
@@ -786,6 +788,60 @@ def case_context_volume():
            f"闲事={rows.get(f'老周{n}', {}).get('jevSource')}（{(rows.get(f'老周{n}', {}).get('outcomeNote') or '')[:14]}） 急事={rows.get(f'{who}{n}', {}).get('jevSource')}（{(rows.get(f'{who}{n}', {}).get('outcomeNote') or '')[:8]}）", [])
 
 
+def case_vibrate_not_quiet():
+    """A ringer on vibrate is how many people keep their phone for years; it must not read as "asked for quiet". On one real day it
+    turned all 165 interrupt verdicts into "later". Also: an urgent matter is delivered audibly even when JEV says later."""
+    broadcast("DEBUG_RINGER", mode="vibrate"); clear_events()
+    signal("fatigue", False)  # a test run itself sends many messages an hour; that fact is not what is tested here
+    adb("shell", "input", "keyevent", "KEYCODE_WAKEUP"); adb("shell", "wm", "dismiss-keyguard"); adb("shell", "input", "keyevent", "KEYCODE_HOME"); time.sleep(2)
+    ev = db("select coalesce(max(id),0) m from events")[0]["m"]
+    n = random.randint(100, 999)
+    broadcast("DEBUG_NOTIFY", app="微信", title=f"小赵{n}", text=random.choice(["下周三下午两点的评审会改到三点了，会议室不变，你看方便吗？", "上次说的那份对比表我发你邮箱了，方便的时候看一眼，不急"]))
+    row = wait_event(ev, f"小赵{n}")
+    broadcast("DEBUG_RINGER", mode="normal")
+    src = (row or {}).get("jevSource") or ""
+    # With nothing occupying him the question is not even put to JEV; the trace says so, and the vibrate fact is absent.
+    ok = bool(row) and "打扰：now" in src and "此刻：" in src and "quiet" not in src
+    record("状态·只震动不算要清净", ok, f"打扰={src[src.find('打扰'):][:60]}", [])
+
+
+def case_digest():
+    """Three messages that can wait arrive during a meeting: none is delivered on its own; when the meeting is over they come as one
+    briefing with the replies drafted, and each held row points at that message."""
+    clear_events(); add_event(f"评审会{R}", -600, 3600); time.sleep(2)
+    broadcast("DEBUG_CAP", alert="30")  # nothing short of 3.0 is urgent, so what JEV says can wait is really held
+    adb("shell", "input", "keyevent", "KEYCODE_HOME"); adb("shell", "input", "keyevent", "KEYCODE_SLEEP"); time.sleep(2)
+    ev = db("select coalesce(max(id),0) m from events")[0]["m"]
+    base = db("select coalesce(max(id),0) m from messages")[0]["m"]
+    n = random.randint(100, 999)
+    # Feishu group notifications read "<sender>：@you <text>"; asks with a date in them are what JEV reliably routes to chat,
+    # and with the alert bar at 3.0 they are held all the same.
+    asks = [("飞书", f"评测产研群{n}", f"小王：@你 周四下午两点的评审改到三点了，会议室不变，麻烦确认下能不能到"),
+            ("飞书", f"UT 群{n}", f"老宋：@你 下周三的周会想请你讲十分钟 JEV 的用法，周一前给我个准话"),
+            ("微信", f"小林{n}", f"UT 名单我更新了一版放共享文档里了，周五前你确认下有没有漏人")]
+    for app, title, text in asks: broadcast("DEBUG_NOTIFY", app=app, title=title, text=text); time.sleep(3)
+    rows = {}
+    for _, title, _ in asks:
+        r = wait_event(ev, title); rows[title] = r
+    held = [t for t, r in rows.items() if r and r["outcome"] == "HELD"]
+    sent_alone = [t for t, r in rows.items() if r and r["outcome"] == "CHAT_SENT"]
+    ignored = [t for t, r in rows.items() if r and r["finalRoute"] == "ignore"]
+    # The meeting is over: the calendar is cleared and the phone is picked up.
+    clear_events(); adb("shell", "input", "keyevent", "KEYCODE_WAKEUP"); adb("shell", "wm", "dismiss-keyguard"); time.sleep(2)
+    broadcast("DEBUG_BREAK", reason=f"开完评审会{R}"); broadcast("DEBUG_CAP", alert="20")
+    end = time.time() + 240; brief = []
+    while time.time() < end and not brief:
+        time.sleep(8)
+        brief = [m for m in db(ROWS.format(base)) if (m["sourceLabel"] or "").startswith("回来简报")]
+    after = {t: db(f"select outcome, outcomeRefId from events where id>{ev} and title='{t}' order by id desc limit 1") for t, _, _ in [(a[1], 0, 0) for a in asks]}
+    digested = [t for t, r in after.items() if r and r[0]["outcome"] == "DIGESTED" and brief and r[0]["outcomeRefId"] == brief[0]["id"]]
+    drafts = [c for m in brief for c in payload(m).get("actions", []) if c.get("tool") == "send_reply"]
+    # Whether each ask deserves a message is the route's business (JEV may drop one as chatter); what is tested is that
+    # nothing chat-worthy went out on its own, and everything held came back as one briefing.
+    ok = held and not sent_alone and bool(brief) and set(digested) == set(held) and len(brief[0]["text"]) <= 260 and "赵甘霖" not in brief[0]["text"]
+    record("回来简报：开会时攒着，会后一次说完", bool(ok), f"攒住={held} 忽略={ignored} 单独发出={sent_alone} 简报={bool(brief)} 并入={digested} 拟回复={len(drafts)} 字数={len(brief[0]['text']) if brief else 0}", brief)
+
+
 def case_moment_call():
     """A real call on the emulator, hung up after a minute. The caller texted this morning, so the moment is worth a word and the word is about that text."""
     forget("call_ended")
@@ -807,19 +863,32 @@ def case_moment_call():
 
 
 def case_moment_screenshot():
-    """The system's own screenshot key: one moment per screenshot, read by the vision call, and either a button or a reasoned silence."""
+    """The system's own screenshot key over another app: one moment per screenshot, read by the vision call, and either a
+    button or a reasoned silence. A screenshot of Spell Mini itself must not fire at all."""
     signal("screenshot"); forget("screenshot")
     base = db("select coalesce(max(id),0) m from messages")[0]["m"]
     n = random.randint(10, 28)
-    send(f"帮我记一下：10月{n}日下午三点在国贸三期80层云酷酒吧，{random.choice(['李总', '陈总', '周老师'])}生日会，联系人小陈")
-    wait_quiet(base); focus_app(); time.sleep(2)
+    # A screenshot of this app is him showing the assistant around, not asking it for anything.
+    focus_app(); time.sleep(2)
+    ev0 = db("select coalesce(max(id),0) m from events")[0]["m"]
+    adb("shell", "input", "keyevent", "120"); time.sleep(12)
+    own = moment_rows(ev0, "screenshot")
+    # The real case: a screen of another app with a time and a place on it. The contact editor renders whatever it is
+    # handed and has no first-run screen (Messages and Calendar on a fresh emulator both sit on one).
+    # An editor left open by an earlier case would swallow the intent, so the contacts task is cleared first.
+    adb("shell", "am", "force-stop", "com.google.android.contacts"); adb("shell", "input", "keyevent", "KEYCODE_HOME"); time.sleep(1)
+    adb("shell", "am", "start", "--activity-clear-task", "-a", "android.intent.action.INSERT", "-t", "vnd.android.cursor.dir/contact", "--es", "name", f"'{random.choice(['李总', '陈总', '周老师'])}生日会'",
+        "--es", "notes", f"'10月{n}日下午三点 国贸三期80层云酷酒吧 联系人小陈'", "--es", "phone", "13900001111"); time.sleep(5)
     ev = db("select coalesce(max(id),0) m from events")[0]["m"]
     adb("shell", "input", "keyevent", "120"); time.sleep(3)
     rows = wait_moment(ev, "screenshot", timeout=150); time.sleep(8)
     rows = moment_rows(ev, "screenshot")
-    signal("screenshot", False)
-    ok = len(rows) == 1 and rows[0]["outcome"] in ("CHAT_SENT", "CHAT_SILENT")
-    record("时刻·截图只触发一次并被读懂", ok, f"行={[(r['finalRoute'], r['outcome'], (r['outcomeNote'] or '')[:30]) for r in rows]}", db(ROWS.format(base)))
+    signal("screenshot", False); adb("shell", "input", "keyevent", "KEYCODE_BACK"); adb("shell", "input", "keyevent", "KEYCODE_BACK"); adb("shell", "input", "keyevent", "KEYCODE_HOME")
+    # What has to hold: the shot was read (the transcription names the party) and answered once, by a message or by a
+    # reasoned silence.
+    read = bool(rows) and any(k in (rows[0]["text"] or "") for k in ("生日", "云酷", "国贸"))
+    ok = not own and len(rows) == 1 and read and (rows[0]["outcome"] in ("CHAT_SENT", "CHAT_SILENT") or rows[0]["finalRoute"] == "ignore")
+    record("时刻·截图只触发一次并被读懂", ok, f"截自家界面触发={len(own)} 读到了={read} 行={[(r['finalRoute'], r['outcome'], (r['outcomeNote'] or '')[:30]) for r in rows]}", db(ROWS.format(base)))
 
 
 def case_moment_home():
@@ -911,7 +980,7 @@ SPECIAL = [
     ("该来没来·记下等下文的事", case_open_loop), ("交办一件活·成品", case_job), ("定时任务到点执行", case_scheduled_task),
     ("订阅·预置源", case_sources_seeded), ("订阅·分流", case_item_routes), ("订阅·碰到手头的事", case_item_touches_work),
     ("订阅·聊天里订阅", case_subscribe_in_chat), ("订阅·真实源能读", case_poll_live),
-    ("状态·开会时", case_context_volume), ("时刻·通话结束", case_moment_call), ("时刻·截图", case_moment_screenshot), ("时刻·到家", case_moment_home),
+    ("状态·开会时", case_context_volume), ("状态·只震动", case_vibrate_not_quiet), ("回来简报", case_digest), ("时刻·通话结束", case_moment_call), ("时刻·截图", case_moment_screenshot), ("时刻·到家", case_moment_home),
     ("时刻·会前十分钟", case_moment_meeting), ("外部·每种接入", case_sources_every_kind), ("信号页", case_signals_page),
 ]
 

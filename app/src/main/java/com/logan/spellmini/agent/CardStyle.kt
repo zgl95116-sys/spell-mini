@@ -24,7 +24,7 @@ object CardStyle {
 
     // Backstops for the times the model ignores the numbers above. Loose on purpose: a bullet cut in the middle of a
     // date reads worse than one that runs four characters long.
-    const val TITLE_CAP = 24
+    const val TITLE_CAP = 32
     const val BODY_CAP = 84
     const val BULLET_CAP = 28
     const val REASON_CAP = 40
@@ -43,22 +43,34 @@ object CardStyle {
         |- body：不超过 $BODY 个字，最多两句。第一句是结论：发生了什么、结果是什么；第二句是这对他意味着什么、要不要做什么。不铺垫、不讲背景、不放「预计约」「近年来」这类泛数据，不重复标题
         |- bullets：2 到 3 条，每条不超过 $BULLET 个字，每条必须带一个硬事实：日期、数字、名字、价格、版本号。不写建议句（「先备好」「建议」「可以」），不写网址。内容里硬事实不够就只写一条
         |- reason：不超过 $REASON 个字，用「你」开头，指向他具体的事或关注（「你十一去日本」「你在盯 JEV」）；看不出关系就写「$DEFAULT_REASON」
+        |- subject：这张卡的主题词，不超过 12 个字，只写事情的主体：产品或模型名（MiMo-V2.6）、公司（智谱）、事件（十一台风）；同一件事的不同报道要写成同一个词
         |- 口吻：直接说事，用「你」不用「用户」，不用感叹号，不用「值得关注」「不容错过」「总之」，正文里不放 emoji
         |- 一个硬事实都没有、或只能写成泛泛的建议时，不做这张卡：enough_material 填 false，skip_reason 写「没有具体事实」
     """.trimMargin()
 
-    data class Text(val title: String, val body: String, val bullets: List<String>, val reason: String)
+    data class Text(val title: String, val body: String, val bullets: List<String>, val reason: String, val subject: String = "")
 
     /** What the code can fix without asking: lengths, stray punctuation, bullets that are links or the title again. */
-    fun tidy(title: String, body: String, bullets: List<String>, reason: String): Text {
-        val cleanTitle = title.replace('\n', ' ').replace(Regex("\\s+"), " ").trim().trimEnd('。', '！', '!', '.').take(TITLE_CAP)
+    fun tidy(title: String, body: String, bullets: List<String>, reason: String, subject: String = ""): Text {
+        val cleanTitle = clip(title.replace('\n', ' ').replace(Regex("\\s+"), " ").trim().trimEnd('。', '！', '!', '.'), TITLE_CAP)
         val cleanBullets = bullets.asSequence()
             .map { it.replace('\n', ' ').replace(Regex("\\s+"), " ").trim().trimStart('-', '•', '·', ' ') }
             .filter { it.isNotBlank() && !isLink(it) && it != cleanTitle }
             .map { clip(it, BULLET_CAP) }
             .distinct().take(3).toList()
-        return Text(cleanTitle, clip(body, BODY_CAP), cleanBullets, clip(reason, REASON_CAP))
+        return Text(cleanTitle, clip(body, BODY_CAP), cleanBullets, clip(reason, REASON_CAP), subject.trim().take(SUBJECT_CAP))
     }
+
+    /** "MiMo-V2.6" and "小米 MiMo V2.6 Pro" are one subject: compared without case, spaces or punctuation, by containment. */
+    fun sameSubject(a: String, b: String): Boolean {
+        val x = key(a); val y = key(b)
+        if (x.length < 2 || y.length < 2) return false
+        return x == y || x.contains(y) || y.contains(x) || TextSim.similarity(x, y) >= 0.6
+    }
+
+    private fun key(subject: String) = subject.lowercase().filter { it.isLetterOrDigit() }
+
+    const val SUBJECT_CAP = 16
 
     private fun isLink(text: String) = Regex("https?://|www\\.|\\.(com|cn|org|net|io)(/|\\b)", RegexOption.IGNORE_CASE).containsMatchIn(text)
 

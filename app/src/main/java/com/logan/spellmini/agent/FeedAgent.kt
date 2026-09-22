@@ -12,6 +12,7 @@ import com.logan.spellmini.data.Outcome
 import com.logan.spellmini.data.Route
 import com.logan.spellmini.data.Settings
 import com.logan.spellmini.net.OpenRouter
+import com.logan.spellmini.net.Source
 import com.logan.spellmini.net.Web
 import com.logan.spellmini.net.arr
 import com.logan.spellmini.net.str
@@ -162,6 +163,7 @@ class FeedAgent(
         """.trimMargin()
         val written = writeCard(prompt, maxTokens = 600)
         val text = written.text ?: return Downstream(Outcome.FEED_SKIPPED, written.note, null, written.cost, elapsed(started))
+        mergeIfSaturated(text, link?.let { Source(event.title.take(80), it, "") })?.let { return it.copy(costUsd = written.cost, latencyMs = elapsed(started)) }
         val cover = link?.let { runCatching { api.fetchOgImage(it) }.getOrNull() }
         val id = db.feed().insert(
             FeedCard(
@@ -171,13 +173,52 @@ class FeedAgent(
                 body = text.body,
                 bulletsJson = buildJsonArray { text.bullets.forEach { add(it) } }.toString(),
                 reason = text.reason,
-                sourcesJson = buildJsonArray { link?.let { addJsonObject { put("title", event.title.take(80)); put("url", it) } } }.toString(),
+                sourcesJson = sourcesJson(text.subject, listOfNotNull(link?.let { Source(event.title.take(80), it, "") })),
                 imagesJson = buildJsonArray { cover?.let { add(it) } }.toString(),
                 sourceLabel = event.appName.take(60),
                 createdAt = System.currentTimeMillis(),
             )
         )
         return Downstream(Outcome.FEED_CARD, "订阅条目直接成卡，没有联网搜索；${written.note}", id, written.cost, elapsed(started))
+    }
+
+    // ------------------------------------------------------------------ one subject, at most two cards a day
+
+    /** The card's sources, with its subject tucked in as an entry without a url (the feed's link list skips it). */
+    private fun sourcesJson(subject: String, sources: List<Source>): String = buildJsonArray {
+        if (subject.isNotBlank()) addJsonObject { put("subject", subject) }
+        sources.forEach { addJsonObject { put("title", it.title); put("url", it.url) } }
+    }.toString()
+
+    private fun subjectOf(card: FeedCard): String = runCatching {
+        (kotlinx.serialization.json.Json.parseToJsonElement(card.sourcesJson) as kotlinx.serialization.json.JsonArray)
+            .mapNotNull { it as? JsonObject }.firstNotNullOfOrNull { it.str("subject") }
+    }.getOrNull().orEmpty()
+
+    /**
+     * JEV tells apart "MiMo released" from "MiMo on the leaderboard" from "MiMo on OpenRouter", and it is right: they
+     * are different news. To him they were seven cards about one model in an hour. So a subject gets two cards a day;
+     * the third and later become a line on the newest of them, with their link, and no new card.
+     */
+    private suspend fun mergeIfSaturated(text: CardStyle.Text, source: Source?): Downstream? {
+        if (text.subject.isBlank()) return null
+        val today = db.feed().since(System.currentTimeMillis() - DAY_MS).filter { CardStyle.sameSubject(subjectOf(it), text.subject) }
+        if (today.size < SUBJECT_CARDS_PER_DAY) return null
+        val target = today.first()
+        val bullets = runCatching {
+            (kotlinx.serialization.json.Json.parseToJsonElement(target.bulletsJson) as kotlinx.serialization.json.JsonArray).mapNotNull { (it as? JsonPrimitive)?.contentOrNull }
+        }.getOrDefault(emptyList())
+        val line = "${SimpleDateFormat("HH:mm", Locale.CHINA).format(Date())} 更新：${text.title}"
+        val merged = (bullets + line).takeLast(MERGED_BULLETS)
+        val sources = runCatching {
+            (kotlinx.serialization.json.Json.parseToJsonElement(target.sourcesJson) as kotlinx.serialization.json.JsonArray).mapNotNull { it as? JsonObject }
+        }.getOrDefault(emptyList())
+        val newSources = buildJsonArray {
+            sources.forEach { add(it) }
+            source?.takeIf { s -> sources.none { it.str("url") == s.url } }?.let { addJsonObject { put("title", it.title); put("url", it.url) } }
+        }
+        db.feed().extend(target.id, buildJsonArray { merged.forEach { add(it) } }.toString(), newSources.toString())
+        return Downstream(Outcome.FEED_SKIPPED, "「${text.subject}」今天已有 ${today.size} 张卡，这条并入 #${target.id} 作为更新", target.id)
     }
 
     // ------------------------------------------------------------------ one writer for every origin
@@ -203,6 +244,7 @@ class FeedAgent(
             val text = CardStyle.tidy(
                 title = card.str("title").orEmpty(), body = card.str("body").orEmpty(),
                 bullets = card.arr("bullets").orEmpty().mapNotNull { (it as? JsonPrimitive)?.contentOrNull }, reason = card.str("reason").orEmpty(),
+                subject = card.str("subject").orEmpty(),
             )
             val emoji = card.str("emoji").orEmpty().take(4)
             val indexes = card.arr("source_indexes").orEmpty().mapNotNull { (it as? JsonPrimitive)?.intOrNull }
@@ -547,6 +589,7 @@ class FeedAgent(
                 ?: Downstream(Outcome.FEED_SKIPPED, "搜索结果撑不起一张卡：${written.note}", null, cost, elapsed(started))
         }
         val used = written.sourceIndexes.mapNotNull { found.sources.getOrNull(it) }.ifEmpty { found.sources.take(3) }.distinctBy { it.url }
+        mergeIfSaturated(text, used.firstOrNull())?.let { return it.copy(costUsd = cost, latencyMs = elapsed(started)) }
 
         // Same pages as an existing card means the same content, whatever the wording of the topic was.
         val cited = db.feed().recentSources(RECENT_CARDS).flatMap { row ->
@@ -569,7 +612,7 @@ class FeedAgent(
                 body = text.body,
                 bulletsJson = buildJsonArray { text.bullets.forEach { add(it) } }.toString(),
                 reason = text.reason,
-                sourcesJson = buildJsonArray { used.forEach { addJsonObject { put("title", it.title); put("url", it.url) } } }.toString(),
+                sourcesJson = sourcesJson(text.subject, used),
                 imagesJson = buildJsonArray { images.forEach { add(it) } }.toString(),
                 sourceLabel = origin.label,
                 createdAt = System.currentTimeMillis(),
@@ -611,6 +654,8 @@ class FeedAgent(
         private const val FOLLOW_REVISIT_MS = 6 * 3_600_000L
         private const val RECENT_CARDS = 40
         private const val DEDUPE_CARDS = 40
+        private const val SUBJECT_CARDS_PER_DAY = 2
+        private const val MERGED_BULLETS = 6
         private const val ROUND_MARKER = "（这一轮）"
         private const val THIN_SUMMARY = 120
         private const val PAGE_EXCERPT = 1_500
@@ -707,9 +752,10 @@ class FeedAgent(
                 put("body", field("string"))
                 put("bullets", listField("string"))
                 put("reason", field("string"))
+                put("subject", field("string"))
                 put("source_indexes", listField("integer"))
             },
-            listOf("enough_material", "skip_reason", "emoji", "title", "body", "bullets", "reason", "source_indexes"),
+            listOf("enough_material", "skip_reason", "emoji", "title", "body", "bullets", "reason", "subject", "source_indexes"),
         )
     }
 }

@@ -62,6 +62,9 @@ object Graph {
     lateinit var now: NowContext
         private set
     lateinit var moments: DeviceMoments
+
+    /** Held notifications, told together at the next break. */
+    lateinit var digest: com.logan.spellmini.agent.Digest
         private set
 
     /** Something another app just handed over; the chat screen picks it up and puts it next to the composer. */
@@ -103,7 +106,8 @@ object Graph {
         sources = Subscriptions(application, db, settings, pipeline)
         pipeline.itemBar = { event -> sources.barFor(event) }
         pushes = com.logan.spellmini.sources.PushHub(sources.store, sources.secrets, pipeline, scope)
-        moments = DeviceMoments(application, db, settings, pipeline, scope) { path -> chat.describeImage(path) }
+        digest = com.logan.spellmini.agent.Digest(db, chat, now, scope)
+        moments = DeviceMoments(application, db, settings, pipeline, scope, { path -> chat.describeImage(path) }, { reason -> digest.flush(reason) })
         moments.attach()
         pipeline.recoverOnStart()
         // Profile-driven feed. A plain loop is enough: the notification listener keeps this process alive, and a
@@ -123,6 +127,7 @@ object Graph {
                 runCatching { pushes.sync() }
                 runCatching { sources.pollDue() }
                 runCatching { moments.tick() }
+                runCatching { digest.tick() }
                 delay(SCHEDULER_TICK_MS)
             }
         }

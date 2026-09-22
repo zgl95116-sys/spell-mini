@@ -51,8 +51,16 @@ class Subscriptions(private val context: Context, private val db: AppDb, private
     /** Adds the presets this install has not been offered yet. A preset the user removed stays removed. */
     suspend fun seedPresets() {
         val offered = settings.offeredPresets
-        val existing = store.all().map { bare(it.url) }.toSet()
+        val all = store.all()
+        val existing = all.map { bare(it.url) }.toSet()
         Presets.ALL.filter { bare(it.url) !in offered && bare(it.url) !in existing }.forEach { store.add(it) }
+        // A bar added to a preset later applies to the row a user already has, unless he set one himself.
+        for (preset in Presets.ALL) {
+            val bar = preset.config[SourceConfig.FIT] ?: continue
+            val mine = all.firstOrNull { it.preset && bare(it.url) == bare(preset.url) } ?: continue
+            if (mine.config.containsKey(SourceConfig.FIT)) continue
+            store.save(mine.copy(config = mine.config + (SourceConfig.FIT to bar)))
+        }
         settings.offeredPresets = offered + Presets.ALL.map { bare(it.url) }
     }
 

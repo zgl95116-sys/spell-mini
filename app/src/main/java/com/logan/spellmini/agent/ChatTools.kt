@@ -267,6 +267,12 @@ internal object ChatTools {
     /** A moment works like a notification in the background, and may also look at what is still open and what is in 在办. */
     fun forMoment(): JsonArray = buildJsonArray { forMode(TurnMode.TRIGGER).forEach { add(it) }; add(unhandled); add(tasks.first()) }
 
+    /** A digest speaks about several notifications at once, so a drafted reply has to say who it goes to. */
+    fun forDigest(): JsonArray = buildJsonArray {
+        add(search); add(readPage); add(reminder(TurnMode.TRIGGER))
+        listOf(draftReply(TurnMode.USER), calendarAgenda, calendar, alarm, openLink, dial, map, copy, contact).forEach { add(it) }
+    }
+
     /** For turns that may only read: searching the web and opening a page. */
     fun lookupOnly(): JsonArray = buildJsonArray { add(search); add(readPage) }
 

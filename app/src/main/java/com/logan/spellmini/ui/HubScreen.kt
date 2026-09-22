@@ -238,6 +238,8 @@ private fun outcomeLine(event: NotifEvent): String? = when {
     event.outcome == Outcome.FEED_CARD -> "→ 已生成 Feed 卡"
     event.outcome == Outcome.FEED_SKIPPED -> "→ 未生成卡片：${event.outcomeNote.orEmpty()}"
     event.outcome == Outcome.CAPPED -> "→ ${event.outcomeNote.orEmpty()}"
+    event.outcome == Outcome.HELD -> "→ 攒着，下个断点一起说：${event.outcomeNote.orEmpty()}"
+    event.outcome == Outcome.DIGESTED -> "→ 已并入简报" + event.outcomeNote?.let { " · $it" }.orEmpty()
     event.outcome == Outcome.ERROR -> "→ 下游出错：${event.outcomeNote.orEmpty()}"
     event.jevError != null -> "JEV 出错：${event.jevError}"
     event.outcome == Outcome.NONE && event.outcomeNote != null -> "→ ${event.outcomeNote}"
@@ -334,7 +336,8 @@ private fun eventJson(event: NotifEvent): JsonObject = buildJsonObject {
     put("title", event.title)
     put("text", event.text)
     put("merged_count", event.mergedCount)
-    put("synthetic", event.synthetic)
+    // Items, moments and pushes reuse the flag internally (no app rule, no sender history); to a reader of the export they are real.
+    put("synthetic", event.synthetic && !Subscriptions.isItem(event) && !SignalCatalog.isMoment(event) && !SignalCatalog.isPush(event))
     put("status", event.status)
     put("filter_reason", event.filterReason)
     put("route", event.route)

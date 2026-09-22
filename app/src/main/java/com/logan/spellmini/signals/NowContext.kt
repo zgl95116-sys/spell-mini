@@ -51,6 +51,12 @@ class NowContext(private val context: Context, private val db: AppDb, private va
     private fun on(id: String) = SignalCatalog.find(id)?.let { settings.signalOn(it.id, it.defaultOn) } == true
     private val clock = SimpleDateFormat("HH:mm", Locale.CHINA)
 
+    /** In a call, a meeting, on the road, asleep or on do-not-disturb: a break has not come yet. */
+    suspend fun occupied(): Boolean = facts().any { it.key in OCCUPIED_KEYS }
+
+    /** Screen on and unlocked: he is looking at the phone right now. */
+    fun inUse(): Boolean = context.getSystemService(PowerManager::class.java).isInteractive && !context.getSystemService(KeyguardManager::class.java).isKeyguardLocked
+
     suspend fun facts(): List<Fact> = buildList {
         val now = System.currentTimeMillis()
         if (on(SignalCatalog.DOING)) SpellListenerService.activities().distinctBy { it.kind }.forEach { activity ->
@@ -71,10 +77,11 @@ class NowContext(private val context: Context, private val db: AppDb, private va
         if (on(SignalCatalog.RINGER)) {
             val audio = context.getSystemService(AudioManager::class.java)
             val dnd = context.getSystemService(NotificationManager::class.java).currentInterruptionFilter.let { it != NotificationManager.INTERRUPTION_FILTER_ALL && it != NotificationManager.INTERRUPTION_FILTER_UNKNOWN }
+            // Only do-not-disturb is a request for quiet. Many people keep the ringer on vibrate for years; read as
+            // "asked for quiet", that one fact turned every message of a whole day into a silent one (165 of 165).
             when {
                 dnd -> add(Fact(SignalCatalog.RINGER, "quiet", "he has switched do-not-disturb on", "勿扰模式开着"))
-                audio.ringerMode == AudioManager.RINGER_MODE_SILENT -> add(Fact(SignalCatalog.RINGER, "quiet", "he has silenced the ringer", "手机静音"))
-                audio.ringerMode == AudioManager.RINGER_MODE_VIBRATE -> add(Fact(SignalCatalog.RINGER, "quiet", "ringer set to vibrate only", "只震动"))
+                audio.ringerMode == AudioManager.RINGER_MODE_SILENT -> add(Fact(SignalCatalog.RINGER, "ringer", "ringer is off (no sound, a banner still reaches him; this is not a request for quiet)", "手机静音（横幅照常）"))
             }
         }
         val interactive = context.getSystemService(PowerManager::class.java).isInteractive
@@ -93,9 +100,10 @@ class NowContext(private val context: Context, private val db: AppDb, private va
         if (on(SignalCatalog.PLACE)) place()?.let { add(it) }
         if (on(SignalCatalog.FOREGROUND_APP)) foregroundApp(now)?.let { add(it) }
         if (on(SignalCatalog.FATIGUE)) {
+            // Only recent, audible interruptions count. Fifty relayed messages over a workday are not fatigue, and a
+            // daily total read as "interrupted many times today" made every message after lunch a quiet one.
             val hour = db.events().countOutcomeSince(Outcome.CHAT_SENT, now - HOUR_MS)
-            val day = db.events().countOutcomeSince(Outcome.CHAT_SENT, startOfDay())
-            if (day > 0) add(Fact(SignalCatalog.FATIGUE, "interruptions", "the assistant has already messaged him $day times today, $hour of them in the last hour", "今天已经主动找过你 $day 次（最近一小时 $hour 次）"))
+            if (hour >= 5) add(Fact(SignalCatalog.FATIGUE, "interruptions", "the assistant has already messaged him $hour times in the last hour; routine matters can wait for the next digest", "最近一小时已经主动找过你 $hour 次"))
         }
     }
 
@@ -205,9 +213,9 @@ class NowContext(private val context: Context, private val db: AppDb, private va
         return lines.takeIf { it.isNotEmpty() }
     }
 
-    private fun startOfDay(): Long = Calendar.getInstance().apply { set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0) }.timeInMillis
 
     companion object {
+        private val OCCUPIED_KEYS = setOf("doing", "calendar", "asleep", "quiet")
         private const val MINUTE_MS = 60_000L
         private const val HOUR_MS = 3_600_000L
         private const val DAY_MS = 24 * HOUR_MS

@@ -86,17 +86,20 @@ data class Criteria(
             "him so far. Use sender when judging personal relevance. right_now never changes whether something is " +
             "relevant; it is for the interrupt question."
 
-        const val INTERRUPT_INSTRUCTIONS = "Given right_now, should the assistant interrupt the user about " +
-            "new_notification at this very moment, or deliver it quietly so he finds it when he next picks up his phone?"
+        const val INTERRUPT_INSTRUCTIONS = "Is this moment a bad one to interrupt the user about new_notification? " +
+            "Judge the moment from right_now, not the importance of the matter: when nothing in right_now shows him " +
+            "occupied, the answer is now."
         const val INTERRUPT_NOW = "now"
         const val INTERRUPT_LATER = "later"
         val INTERRUPT_CRITERIA = mapOf(
-            INTERRUPT_NOW to "He is reachable and nothing in right_now argues against a sound or a banner; or the matter " +
-                "cannot wait (money being taken, safety, someone waiting for him right now, a change to something starting " +
-                "within the hour), whatever he is doing; or the sender is someone he answers within minutes.",
-            INTERRUPT_LATER to "right_now shows he is occupied or has asked for quiet (in a meeting or a call, driving " +
-                "or navigating, sharing his screen, asleep, ringer silenced or do-not-disturb on, already interrupted " +
-                "many times today) and the matter can wait an hour without loss.",
+            INTERRUPT_NOW to "right_now shows nothing that occupies him (no call, meeting, driving, screen sharing, sleep " +
+                "or do-not-disturb), whether or not the matter is important; or the matter cannot wait (money being " +
+                "taken, safety, someone waiting for him right now, a change to something starting within the hour), " +
+                "whatever he is doing; or the sender is someone he answers within minutes.",
+            INTERRUPT_LATER to "right_now shows him occupied or asking for quiet (in a meeting or a call, driving or " +
+                "navigating, sharing his screen, asleep, do-not-disturb on) and the matter can wait an hour without " +
+                "loss; or right_now says he has been messaged many times this hour and this is routine. A silenced or " +
+                "vibrating ringer, him using the phone, or the matter being minor, is not a reason to wait.",
         )
 
         /**

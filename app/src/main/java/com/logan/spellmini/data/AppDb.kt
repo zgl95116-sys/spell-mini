@@ -110,6 +110,10 @@ interface EventDao {
 
     @Query("SELECT MAX(id) FROM events") suspend fun maxId(): Long?
 
+    @Query("SELECT * FROM events WHERE outcome = 'HELD' ORDER BY postedAt ASC LIMIT :limit") suspend fun held(limit: Int): List<NotifEvent>
+    @Query("SELECT MIN(postedAt) FROM events WHERE outcome = 'HELD'") suspend fun oldestHeldAt(): Long?
+    @Query("SELECT COUNT(*) FROM events WHERE outcome = 'HELD'") suspend fun countHeld(): Int
+
     @Query("SELECT * FROM events ORDER BY id ASC") suspend fun all(): List<NotifEvent>
 
     @Query("SELECT COUNT(*) FROM events WHERE status != 'SEEN'") fun total(): Flow<Int>
@@ -192,6 +196,9 @@ interface FeedDao {
 
     @Query("UPDATE feed SET liked = :liked WHERE id = :id") suspend fun setLiked(id: Long, liked: Boolean)
     @Query("UPDATE feed SET dismissed = 1 WHERE id = :id") suspend fun dismiss(id: Long)
+
+    @Query("SELECT * FROM feed WHERE createdAt >= :since ORDER BY createdAt DESC") suspend fun since(since: Long): List<FeedCard>
+    @Query("UPDATE feed SET bulletsJson = :bullets, sourcesJson = :sources WHERE id = :id") suspend fun extend(id: Long, bullets: String, sources: String)
 }
 
 @Dao

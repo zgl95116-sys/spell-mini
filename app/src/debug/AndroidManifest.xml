@@ -21,6 +21,8 @@
                 <action android:name="com.logan.spellmini.DEBUG_MOMENT" />
                 <action android:name="com.logan.spellmini.DEBUG_NOW" />
                 <action android:name="com.logan.spellmini.DEBUG_CAP" />
+                <action android:name="com.logan.spellmini.DEBUG_RINGER" />
+                <action android:name="com.logan.spellmini.DEBUG_BREAK" />
                 <action android:name="com.logan.spellmini.DEBUG_FORGET" />
                 <action android:name="com.logan.spellmini.DEBUG_PLACE" />
                 <action android:name="com.logan.spellmini.DEBUG_SOURCE" />
