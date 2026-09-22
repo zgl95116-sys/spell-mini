@@ -8,3 +8,4 @@ app/build/
 captures/
 dist/
 tools/.e2e/
+.e2e/

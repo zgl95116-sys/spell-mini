@@ -345,7 +345,7 @@ class Subscriptions(private val context: Context, private val db: AppDb, private
          * place the pipeline can read it without a lookup. He asked for that source by name, so its items only have to
          * be on topic at all, not as close to him as the items of a broad preset feed.
          */
-        private const val OWN_PICK = "u"
+        const val OWN_PICK = "u"
         fun pkgFor(source: FeedSource) = PKG_PREFIX + (if (source.preset) "" else OWN_PICK) + source.id
         fun isOwnPick(event: NotifEvent): Boolean = event.pkg.startsWith(PKG_PREFIX + OWN_PICK)
         fun isItemLabel(label: String?): Boolean = label?.startsWith(LABEL) == true

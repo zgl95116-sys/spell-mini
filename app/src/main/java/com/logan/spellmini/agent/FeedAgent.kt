@@ -99,7 +99,7 @@ class FeedAgent(
             |
             |如果值得做，给出：
             |- query：一个具体的中文搜索词，带上关键名称和时间；
-            |- angle：这张卡要回答的核心问题；
+            |- angle：这张卡要回答的核心问题，必须关于一件具体的事（谁、什么、什么时候），不是一个话题；
             |- headline：这条内容本身的短标题，不超过 16 个字（通知标题有时只是发件人或号码，要从正文里提炼）；
             |- why：直接对用户说的一句话，说明为什么觉得他会感兴趣，不超过 30 字。
         """.trimMargin()
@@ -157,37 +157,66 @@ class FeedAgent(
             |${alreadyRead.ifBlank { "（没有）" }}
             |如果这一条说的就是其中某张卡的同一件事、没有新信息，把 enough_material 填 false，skip_reason 写「和已有的卡重复」。内容只有一句口号、纯广告或看不出讲了什么时，同样填 false 并说明原因。
             |
-            |这是手机上一划而过的信息流，不是文章：
-            |- emoji：一个贴题的 emoji
-            |- title：不超过 16 个字，说清是什么事，不要标题党；原标题是英文就译成中文，专有名词保留原文
-            |- body：两三句话，不超过 80 个字。先说结论，像朋友发来的一条消息；不重复标题，不写「值得关注」这类空话
-            |- bullets：2 到 3 条，每条不超过 20 个字，只放硬信息：数字、时间、名字、价格；内容里没有就少写
-            |- reason：一句话说明这条和他有什么关系（结合画像），不超过 30 个字；看不出关系就写「来自你订阅的源」
+            |${CardStyle.RULES}
             |- source_indexes：填空数组
         """.trimMargin()
-        val (card, cost) = api.chatJson(buildJsonArray { add(OpenRouter.msg("user", prompt)) }, CARD_SCHEMA, maxTokens = 600)
-        if ((card["enough_material"] as? JsonPrimitive)?.booleanOrNull != true || card.str("body").isNullOrBlank()) {
-            return Downstream(Outcome.FEED_SKIPPED, card.str("skip_reason").orEmpty().take(100).ifBlank { "撑不起一张卡" }, null, cost, elapsed(started))
-        }
+        val written = writeCard(prompt, maxTokens = 600)
+        val text = written.text ?: return Downstream(Outcome.FEED_SKIPPED, written.note, null, written.cost, elapsed(started))
         val cover = link?.let { runCatching { api.fetchOgImage(it) }.getOrNull() }
         val id = db.feed().insert(
             FeedCard(
                 eventId = event.id,
-                emoji = card.str("emoji").orEmpty().ifBlank { "📰" }.take(4),
-                title = card.str("title").orEmpty().ifBlank { event.title }.take(32),
-                body = clip(card.str("body").orEmpty(), BODY_LIMIT),
-                bulletsJson = buildJsonArray {
-                    card.arr("bullets").orEmpty().mapNotNull { (it as? JsonPrimitive)?.contentOrNull }
-                        .filter { it.isNotBlank() }.take(3).forEach { add(clip(it, BULLET_LIMIT)) }
-                }.toString(),
-                reason = card.str("reason").orEmpty().take(60),
+                emoji = written.emoji.ifBlank { "📰" },
+                title = text.title.ifBlank { event.title.take(CardStyle.TITLE_CAP) },
+                body = text.body,
+                bulletsJson = buildJsonArray { text.bullets.forEach { add(it) } }.toString(),
+                reason = text.reason,
                 sourcesJson = buildJsonArray { link?.let { addJsonObject { put("title", event.title.take(80)); put("url", it) } } }.toString(),
                 imagesJson = buildJsonArray { cover?.let { add(it) } }.toString(),
                 sourceLabel = event.appName.take(60),
                 createdAt = System.currentTimeMillis(),
             )
         )
-        return Downstream(Outcome.FEED_CARD, "订阅条目直接成卡，没有联网搜索", id, cost, elapsed(started))
+        return Downstream(Outcome.FEED_CARD, "订阅条目直接成卡，没有联网搜索；${written.note}", id, written.cost, elapsed(started))
+    }
+
+    // ------------------------------------------------------------------ one writer for every origin
+
+    /** A written card: [text] is null when the writer declined or the draft could not be brought up to the rules. */
+    private class Written(val text: CardStyle.Text?, val emoji: String, val sourceIndexes: List<Int>, val cost: Double, val note: String)
+
+    /**
+     * Asks the writer for a card, tidies what the code can tidy, and has JEV read it the way the user will: is it one
+     * specific thing, and is it made of facts? A draft that fails gets one more try with the verdict; a second failure
+     * means the material was too thin for the rules, and no card is better than a vague one.
+     */
+    private suspend fun writeCard(prompt: String, maxTokens: Int): Written {
+        var cost = 0.0
+        var attempt = prompt
+        var previous: Pair<CardStyle.Text, CardStyle.Grade>? = null
+        repeat(2) { round ->
+            val (card, writeCost) = api.chatJson(buildJsonArray { add(OpenRouter.msg("user", attempt)) }, CARD_SCHEMA, maxTokens = maxTokens)
+            cost += writeCost
+            if ((card["enough_material"] as? JsonPrimitive)?.booleanOrNull != true || card.str("body").isNullOrBlank()) {
+                return Written(null, "", emptyList(), cost, card.str("skip_reason").orEmpty().take(100).ifBlank { "撑不起一张卡" })
+            }
+            val text = CardStyle.tidy(
+                title = card.str("title").orEmpty(), body = card.str("body").orEmpty(),
+                bullets = card.arr("bullets").orEmpty().mapNotNull { (it as? JsonPrimitive)?.contentOrNull }, reason = card.str("reason").orEmpty(),
+            )
+            val emoji = card.str("emoji").orEmpty().take(4)
+            val indexes = card.arr("source_indexes").orEmpty().mapNotNull { (it as? JsonPrimitive)?.intOrNull }
+            val grade = CardStyle.grade(api, text)
+            cost += grade?.costUsd ?: 0.0
+            when {
+                grade == null -> return Written(text, emoji, indexes, cost, "复核没跑成，按原稿出卡")
+                grade.ok -> return Written(text, emoji, indexes, cost, "复核 $grade" + if (round == 1) "（重写一次）" else "")
+                else -> { previous = text to grade; attempt = prompt + CardStyle.feedback(text, grade) }
+            }
+        }
+        val (text, grade) = previous!!
+        Log.i(TAG, "card not made: $grade after rewrite; title=${text.title}")
+        return Written(null, "", emptyList(), cost, "写不具体，两版都没过（$grade）")
     }
 
     // ------------------------------------------------------------------ interest patrol
@@ -295,9 +324,10 @@ class FeedAgent(
                 |2. 他最近在关注的事：最近在聊天里提过的、最近通知里反复出现的、刚点过喜欢的方向；
                 |3. 画像里的长期兴趣。
                 |好选题还要满足：
-                |- 有时效或新意：最近的进展、即将发生的事，或和当下时间相关的实用信息（周末去哪、换季、节假日安排）；
+                |- 一个选题就是一件具体的事：一次发布、一个数字、一项进展、一个日期——谁、做了什么、什么时候。不是「赴日攻略」，是「10 月 2 日台风预计登陆关东」；不是「JEV 社区动态」，是「jev-test 加了批量评测脚本」；
+                |- 他要的是最新发生的事：发布、进展、论文、项目、数据、舆情、价格变化。攻略、清单、解读、对比，只在直接关系到他有日期的安排时做，而且同样落到一件具体的事上；
                 |- 不重复：下面「做过的选题」和「已有的卡片」里的事不要再做。换个说法、换个问法去写同一件事，也算重复。同一个主题想再做，必须是新的进展或完全不同的角度；
-                |- 轮换：内容类型换着来（最新动态、实用攻略、选购对比、本地活动、深度解读、清单推荐），不要连着几张都是同一个兴趣；
+                |- 不要连着几张都是同一个兴趣；
                 |- 核心兴趣都做过了，就往相邻的方向找（比如摄影器材 → 这个季节的拍摄地；养猫 → 换季护理），但要说得出和他有什么关系；
                 |- 避开他划掉过的主题，多往他点过喜欢的方向靠。
                 |$brief$again
@@ -323,7 +353,7 @@ class FeedAgent(
                 |他划掉的卡：$dismissed
                 |已有的卡片：$existing
                 |
-                |每个选题给出：interest（对应哪个兴趣或关注主题，几个字）、follow（如果是为某个「持续关注的主题」找的，原样填那个主题，否则填空字符串）、query（具体的中文搜索词，带上关键名称和时间）、angle（这张卡要回答的核心问题）。
+                |每个选题给出：interest（对应哪个兴趣或关注主题，几个字）、follow（如果是为某个「持续关注的主题」找的，原样填那个主题，否则填空字符串）、query（具体的中文搜索词，带上关键名称和时间）、angle（这张卡要回答的核心问题，必须关于一件具体的事：谁、什么、什么时候）。
             """.trimMargin()
             // Reasoning stays off: with it on, planning took 22-30s and sometimes ran out of tokens before any JSON.
             val (parsed, cost) = api.chatJson(buildJsonArray { add(OpenRouter.msg("user", prompt)) }, TOPICS_SCHEMA, maxTokens = 1_200)
@@ -505,25 +535,18 @@ class FeedAgent(
             |${alreadyRead.ifBlank { "（没有）" }}
             |只写这些卡片里没有的新信息。搜索结果里如果没有比它们更新的东西，就把 enough_material 填 false，skip_reason 写「没有新进展」，不要把看过的内容换个说法再写一遍。
             |
-            |这是手机上一划而过的信息流，不是文章。他扫一眼就要知道「是什么、跟我有什么关系」，想细看会点来源。所以要短：
             |- enough_material：搜索结果能不能支撑这张卡要回答的问题。搜到的内容跑题、过时或只有只言片语时填 false，
             |  并在 skip_reason 里用一句话说明；此时其余字段留空即可。不要写一张「没找到」的卡。
-            |- emoji：一个贴题的 emoji
-            |- title：不超过 16 个字，像朋友转给你的标题，不要标题党
-            |- body：两三句话，不超过 80 个字。先说结论，像朋友发来的一条消息；不铺垫，不重复标题，不写「总之」「值得关注」这类空话
-            |- bullets：2 到 3 条，每条不超过 20 个字，只放影响判断的硬信息：时间、数字、地点、名字、价格
-            |- reason：一句话说明为什么推给他（结合他的画像或起因），不超过 30 个字
+            |${CardStyle.RULES}
             |- source_indexes：你实际用到的来源编号
         """.trimMargin()
-        val (card, writeCost) = api.chatJson(buildJsonArray { add(OpenRouter.msg("user", writePrompt)) }, CARD_SCHEMA, maxTokens = 700)
-        cost += writeCost
-        if ((card["enough_material"] as? JsonPrimitive)?.booleanOrNull != true || card.str("body").isNullOrBlank()) {
-            val reason = card.str("skip_reason").orEmpty().take(100)
-            return origin.fallback?.let { light(origin, it, found.sources.take(3), reason, cost, started) }
-                ?: Downstream(Outcome.FEED_SKIPPED, "搜索结果撑不起一张卡：$reason", null, cost, elapsed(started))
+        val written = writeCard(writePrompt, maxTokens = 700)
+        cost += written.cost
+        val text = written.text ?: run {
+            return origin.fallback?.let { light(origin, it, found.sources.take(3), written.note, cost, started) }
+                ?: Downstream(Outcome.FEED_SKIPPED, "搜索结果撑不起一张卡：${written.note}", null, cost, elapsed(started))
         }
-        val used = card.arr("source_indexes").orEmpty().mapNotNull { (it as? JsonPrimitive)?.intOrNull }
-            .mapNotNull { found.sources.getOrNull(it) }.ifEmpty { found.sources.take(3) }.distinctBy { it.url }
+        val used = written.sourceIndexes.mapNotNull { found.sources.getOrNull(it) }.ifEmpty { found.sources.take(3) }.distinctBy { it.url }
 
         // Same pages as an existing card means the same content, whatever the wording of the topic was.
         val cited = db.feed().recentSources(RECENT_CARDS).flatMap { row ->
@@ -541,31 +564,18 @@ class FeedAgent(
         val id = db.feed().insert(
             FeedCard(
                 eventId = origin.eventId,
-                emoji = card.str("emoji").orEmpty().ifBlank { "✨" }.take(4),
-                title = card.str("title").orEmpty().ifBlank { angle }.take(32),
-                // The prompt asks for 80 characters; this is the backstop for the times the model ignores it.
-                body = clip(card.str("body").orEmpty(), BODY_LIMIT),
-                bulletsJson = buildJsonArray {
-                    card.arr("bullets").orEmpty().mapNotNull { (it as? JsonPrimitive)?.contentOrNull }
-                        .filter { it.isNotBlank() }.take(3).forEach { add(clip(it, BULLET_LIMIT)) }
-                }.toString(),
-                reason = card.str("reason").orEmpty().take(60),
+                emoji = written.emoji.ifBlank { "✨" },
+                title = text.title.ifBlank { CardStyle.clip(angle, CardStyle.TITLE_CAP) },
+                body = text.body,
+                bulletsJson = buildJsonArray { text.bullets.forEach { add(it) } }.toString(),
+                reason = text.reason,
                 sourcesJson = buildJsonArray { used.forEach { addJsonObject { put("title", it.title); put("url", it.url) } } }.toString(),
                 imagesJson = buildJsonArray { images.forEach { add(it) } }.toString(),
                 sourceLabel = origin.label,
                 createdAt = System.currentTimeMillis(),
             )
         )
-        return Downstream(Outcome.FEED_CARD, query, id, cost, elapsed(started))
-    }
-
-    /** Cuts at the last sentence end that fits; failing that, mid-sentence with an ellipsis. */
-    private fun clip(text: String, limit: Int): String {
-        val clean = text.trim()
-        if (clean.length <= limit) return clean
-        val head = clean.take(limit)
-        val end = head.indexOfLast { it in "。！？；" }
-        return if (end >= limit / 2) head.take(end + 1) else head.trimEnd('，', '、', ' ') + "…"
+        return Downstream(Outcome.FEED_CARD, "$query；${written.note}", id, cost, elapsed(started))
     }
 
     /**
@@ -577,7 +587,7 @@ class FeedAgent(
             FeedCard(
                 eventId = origin.eventId,
                 emoji = "📌",
-                title = card.title,
+                title = CardStyle.clip(card.title, CardStyle.TITLE_CAP),
                 body = listOf(card.why, "没搜到更多靠谱的延展，原内容在「${card.appName}」里，点「打开原内容」直接看。")
                     .filter { it.isNotBlank() }.joinToString("\n"),
                 reason = card.why,
@@ -601,8 +611,6 @@ class FeedAgent(
         private const val FOLLOW_REVISIT_MS = 6 * 3_600_000L
         private const val RECENT_CARDS = 40
         private const val DEDUPE_CARDS = 40
-        private const val BODY_LIMIT = 110
-        private const val BULLET_LIMIT = 26
         private const val ROUND_MARKER = "（这一轮）"
         private const val THIN_SUMMARY = 120
         private const val PAGE_EXCERPT = 1_500

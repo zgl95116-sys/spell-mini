@@ -36,8 +36,10 @@ class DebugReceiver : BroadcastReceiver() {
             ACTION_ITEM -> Graph.scope.launch {
                 val source = intent.getStringExtra("source").orEmpty().ifBlank { "测试源" }
                 val link = intent.getStringExtra("link").orEmpty().ifBlank { "https://example.com/" + System.nanoTime() }
+                // own=1 files the item as if the source were one the user added himself, which carries the lower fit bar.
+                val own = if (intent.getStringExtra("own") == "1") com.logan.spellmini.sources.Subscriptions.OWN_PICK else ""
                 Graph.pipeline.ingestItem(
-                    pkg = com.logan.spellmini.sources.Subscriptions.PKG_PREFIX + "debug", appName = com.logan.spellmini.sources.Subscriptions.LABEL + source,
+                    pkg = com.logan.spellmini.sources.Subscriptions.PKG_PREFIX + own + "debug", appName = com.logan.spellmini.sources.Subscriptions.LABEL + source,
                     key = com.logan.spellmini.sources.Subscriptions.keyFor(0, link), title = intent.getStringExtra("title").orEmpty(), text = text, category = null,
                 )
             }

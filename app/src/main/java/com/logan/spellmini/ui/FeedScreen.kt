@@ -61,6 +61,7 @@ import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.logan.spellmini.Graph
 import com.logan.spellmini.actions.Actions
+import com.logan.spellmini.agent.CardStyle
 import com.logan.spellmini.agent.FeedAgent
 import com.logan.spellmini.agent.JobAgent
 import com.logan.spellmini.data.FeedCard
@@ -260,6 +261,25 @@ private fun Cover(url: String) {
     )
 }
 
+/**
+ * A picture beside the title instead of a banner above it. Most covers are a site's stock banner or a generated title
+ * card; full width, one of them fills half the screen and says nothing the title does not. Beside the title it is a
+ * cue, and the text stays where the eye lands first.
+ */
+@Composable
+private fun Thumb(url: String) {
+    var usable by remember(url) { mutableStateOf(true) }
+    if (!usable) return
+    AsyncImage(
+        model = url, contentDescription = null, contentScale = ContentScale.Crop,
+        onSuccess = { state -> if (state.result.drawable.intrinsicWidth < MIN_COVER_PX) usable = false },
+        onError = { usable = false },
+        modifier = Modifier.padding(start = 12.dp).size(THUMB_DP.dp).clip(RoundedCornerShape(12.dp)).background(Ink.Bubble),
+    )
+}
+
+private const val THUMB_DP = 84
+
 private const val MIN_COVER_PX = 300
 
 /** Cards written before the text limits came in can run to 400 characters; those start folded. */
@@ -282,7 +302,7 @@ private fun FeedCardView(card: FeedCard, onDiscuss: () -> Unit) {
     val shape = RoundedCornerShape(22.dp)
 
     Column(Modifier.padding(horizontal = 14.dp, vertical = 6.dp).fillMaxWidth().clip(shape).background(Color.White).border(1.dp, Ink.Line, shape)) {
-        images.firstOrNull()?.let { Cover(it) }
+        if (isDoc) images.firstOrNull()?.let { Cover(it) }
         Column(Modifier.padding(start = 16.dp, end = 16.dp, top = 14.dp, bottom = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
@@ -291,14 +311,23 @@ private fun FeedCardView(card: FeedCard, onDiscuss: () -> Unit) {
                 )
                 Text(formatClock(card.createdAt), color = Ink.Faint, fontSize = 12.sp)
             }
-            Text(card.title, color = Ink.Black, fontSize = 18.sp, fontWeight = FontWeight.SemiBold, lineHeight = 24.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            Row(verticalAlignment = Alignment.Top) {
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    // The one line that says why this is his: above the title, where a glance lands, instead of behind the chevron.
+                    if (!isDoc && card.reason.isNotBlank() && card.reason != CardStyle.DEFAULT_REASON) {
+                        Text(card.reason, color = Ink.Blue, fontSize = 13.sp, lineHeight = 18.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                    Text(card.title, color = Ink.Black, fontSize = 18.sp, fontWeight = FontWeight.SemiBold, lineHeight = 24.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                }
+                if (!isDoc) images.firstOrNull()?.let { Thumb(it) }
+            }
             if (isDoc) {
                 Text(card.reason, color = Ink.Body, fontSize = 14.5.sp, lineHeight = 22.sp, maxLines = 4, overflow = TextOverflow.Ellipsis)
                 Pill("打开全文", Ink.Black, filled = true) { Graph.openDoc.value = card.id }
             } else {
                 Text(
                     card.body, color = Ink.Body, fontSize = 14.5.sp, lineHeight = 22.sp, overflow = TextOverflow.Ellipsis,
-                    maxLines = if (expanded) Int.MAX_VALUE else 3, modifier = Modifier.clickable { expanded = !expanded },
+                    maxLines = if (expanded) Int.MAX_VALUE else 4, modifier = Modifier.clickable { expanded = !expanded },
                 )
             }
             if (!isDoc && (expanded || !long)) {
@@ -314,7 +343,6 @@ private fun FeedCardView(card: FeedCard, onDiscuss: () -> Unit) {
                     Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(Ink.Bubble).padding(12.dp),
                     verticalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
-                    if (card.reason.isNotBlank()) Text("为什么推给你：${card.reason}", color = Ink.Body, fontSize = 13.sp, lineHeight = 19.sp)
                     sources.forEach { (title, url) ->
                         Text(
                             title.ifBlank { url }, color = Ink.Blue, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,

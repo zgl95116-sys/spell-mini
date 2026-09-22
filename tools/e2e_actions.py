@@ -599,6 +599,13 @@ def sources_in_store():
     return out
 
 
+def style_ok(card):
+    """Every card is written to one spec (CardStyle): short title, a body of at most two sentences, up to three bullets of hard facts, no links in bullets."""
+    bullets = json.loads(card["bulletsJson"] or "[]")
+    return (len(card["title"]) <= 24 and len(card["body"]) <= 84 and card["body"].count("。") <= 2 and len(bullets) <= 3
+            and all(len(b) <= 28 and "http" not in b for b in bullets))
+
+
 def item(source, title, text, link):
     """An item of a subscribed source, through the same entry the poller uses."""
     adb("shell", "input", "keyevent", "KEYCODE_HOME"); time.sleep(1)
@@ -622,8 +629,9 @@ def case_item_routes():
     good_link = f"https://example.com/agent-eval-{n}"
     item("测试源", good_title, f"{maker}发布面向手机端 Agent 的评测集 M{n}，包含 {n} 个跨 App 真实任务，给出了任务完成率与步数两个指标，并在 {bench} 上对比了主流模型的工具调用稳定性。数据与评测脚本已开源。", good_link)
     good = wait_event(ev, good_title)
-    card = db(f"select title, sourceLabel, sourcesJson from feed where eventId=(select id from events where title='{good_title}' order by id desc limit 1)")
+    card = db(f"select title, body, bulletsJson, sourceLabel, sourcesJson from feed where eventId=(select id from events where title='{good_title}' order by id desc limit 1)")
     linked = bool(card) and good_link in card[0]["sourcesJson"] and card[0]["sourceLabel"].startswith("订阅 · ")
+    styled = bool(card) and style_ok(card[0]) and "复核" in (good or {}).get("outcomeNote", "")
 
     junk_title = f"某交易所上线 {n} 倍杠杆新币，注册即送空投"
     item("测试源", junk_title, "限时活动：注册并完成首笔交易即可领取空投奖励，邀请好友再得返佣，名额有限先到先得。", f"https://example.com/promo-{n}")
@@ -634,9 +642,9 @@ def case_item_routes():
     again = wait_event(ev, again_title)
     second = db(f"select count(*) c from feed where eventId=(select id from events where title='{again_title}' order by id desc limit 1)")[0]["c"]
 
-    ok = bool(good) and good["outcome"] == "FEED_CARD" and linked and bool(junk) and junk["finalRoute"] == "ignore" and bool(again) and second == 0
+    ok = bool(good) and good["outcome"] == "FEED_CARD" and linked and styled and bool(junk) and junk["finalRoute"] == "ignore" and bool(again) and second == 0
     record("订阅·分流：成卡 / 忽略 / 重复不出第二张", ok,
-           f"相关={good and (good['finalRoute'], good['outcome'])} 带原文链接={linked} 无关={junk and junk['finalRoute']} "
+           f"相关={good and (good['finalRoute'], good['outcome'])} 带原文链接={linked} 样式合规={styled} 无关={junk and junk['finalRoute']} "
            f"重复={again and (again['finalRoute'], again['outcome'], (again['outcomeNote'] or '')[:40])} 第二张卡={second}", [])
 
 
